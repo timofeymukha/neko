@@ -38,7 +38,7 @@ submodule (simulation_component) simulation_component_fctry
   use lambda2, only : lambda2_t
   use probes, only : probes_t
   use les_simcomp, only : les_simcomp_t
-  use utils, only : concat_string_array, neko_error
+  use utils, only : concat_string_array
   use field_writer, only : field_writer_t
   use weak_grad, only : weak_grad_t
   use derivative, only : derivative_t

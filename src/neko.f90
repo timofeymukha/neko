@@ -99,14 +99,13 @@ module neko
   use matrix, only : matrix_t
   use tensor
   use simulation_component, only : simulation_component_t, &
-       simulation_component_wrapper_t
+       simulation_component_wrapper_t, neko_simcomps
   use probes, only : probes_t
   use spectral_error_indicator
   use system, only : system_cpu_name, system_cpuid
   use drag_torque, only : drag_torque_zone, drag_torque_facet, drag_torque_pt
   use field_registry, only : neko_field_registry
   use scratch_registry, only : neko_scratch_registry
-  use simcomp_executor, only : neko_simcomps
   use data_streamer, only : data_streamer_t
   use time_interpolator, only : time_interpolator_t
   use point_interpolator, only : point_interpolator_t

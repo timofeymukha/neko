@@ -36,7 +36,7 @@
 module vorticity
   use num_types, only : rp, dp, sp
   use json_module, only : json_file
-  use simulation_component, only : simulation_component_t
+  use simulation_component, only : simulation_component_t, communicate
   use field_registry, only : neko_field_registry
   use field, only : field_t
   use operators, only : curl
@@ -69,6 +69,8 @@ module vorticity
      !> Work array.
      type(field_t) :: temp2
 
+     integer :: array(3) = 0
+
      !> Output writer.
      type(field_writer_t) :: writer
 
@@ -82,7 +84,12 @@ module vorticity
      procedure, pass(this) :: free => vorticity_free
      !> Compute the vorticity field.
      procedure, pass(this) :: compute_ => vorticity_compute
+     procedure, pass(this) :: getter_ => vorticity_getter
   end type vorticity_t
+
+  type interger_wrapper
+    integer :: obj
+  end type
 
 contains
 
@@ -110,6 +117,8 @@ contains
   !> Actual constructor.
   subroutine vorticity_init_from_attributes(this)
     class(vorticity_t), intent(inout) :: this
+
+    this%name = "vorticity"
 
     this%u => neko_field_registry%get_field_by_name("u")
     this%v => neko_field_registry%get_field_by_name("v")
@@ -151,5 +160,16 @@ contains
     call curl(this%omega_x, this%omega_y, this%omega_z, this%u, this%v, &
                  this%w, this%temp1, this%temp2, this%case%fluid%c_Xh)
   end subroutine vorticity_compute
+
+  subroutine vorticity_getter(this, name, object)
+    class(vorticity_t), intent(inout) :: this
+    character(len=20) :: name
+    class(*), pointer, intent(inout) :: object
+    type(interger_wrapper), target :: int
+
+
+    object => int
+    allocate(interger_wrapper::object)
+  end subroutine vorticity_getter
 
 end module vorticity
