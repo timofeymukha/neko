@@ -33,8 +33,6 @@
 !> Contains the `simcomp_executor_t` type.
 module simcomp_executor
   use num_types, only : rp
-  use simulation_component, only : simulation_component_t, &
-       simulation_component_wrapper_t, simulation_component_factory
   use json_module, only : json_file, json_core, json_value
   use json_utils, only : json_get, json_get_or_default, json_extract_item
   use case, only : case_t

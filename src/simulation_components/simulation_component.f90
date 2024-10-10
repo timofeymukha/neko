@@ -67,8 +67,11 @@ module simulation_component
      !> The simcomp_executor_t this simcomp belongs to.
      type(simcomp_executor_t), pointer, private :: executor_ => null()
    contains
-     !> Constructor for the simulation_component_t (base) class.
+     !> Constructor for the simulation_component_t (base) class from JSON.
      procedure, pass(this) :: init_base => simulation_component_init_base
+     !> Constructor for the simulation_component_t (base) class from components.
+     procedure, pass(this) :: init_base_from_components => &
+          simulation_component_init_base_from_components
      !> Destructor for the simulation_component_t (base) class.
      procedure, pass(this) :: free_base => simulation_component_free_base
      !> Wrapper for calling `set_counter` for the time based controllers.
@@ -77,7 +80,7 @@ module simulation_component
      !> Wrapper for calling `preprocess_` based on the `preprocess_controller`.
      !! Serves as the public interface.
      procedure, pass(this) :: preprocess => &
-       simulation_component_preprocess_wrapper
+          simulation_component_preprocess_wrapper
      !> Wrapper for calling `compute_` based on the `compute_controller`.
      !! Serves as the public interface.
      procedure, pass(this) :: compute => simulation_component_compute_wrapper
@@ -95,9 +98,9 @@ module simulation_component
   end type simulation_component_t
 
   !> A helper type that is needed to have an array of polymorphic objects
-  type, public :: simulation_component_wrapper_t
+  type, public :: simulation_component_alloc_t
      class(simulation_component_t), allocatable :: simcomp
-  end type simulation_component_wrapper_t
+  end type simulation_component_alloc_t
 
   !> Singleton type that serves as a driver for the simulation components.
   !! Stores all the components in the case and provides an interface matching
@@ -107,7 +110,7 @@ module simulation_component
   !! By default, the order is by the order of apparence in the case file.
   type, public :: simcomp_executor_t
      !> The simcomps.
-     class(simulation_component_wrapper_t), allocatable :: simcomps(:)
+     class(simulation_component_alloc_t), allocatable :: simcomps(:)
      !> Number of simcomps
      integer :: n_simcomps
      !> The case
@@ -178,6 +181,11 @@ module simulation_component
   public :: simulation_component_factory, communicate
 
 contains
+
+  !
+  ! simulation_component_t procedures
+  !
+
   !> Constructor for the `simulation_component_t` (base) class.
   subroutine simulation_component_init_base(this, json, case)
     class(simulation_component_t), intent(inout) :: this
@@ -187,8 +195,6 @@ contains
          output_control
     real(kind=rp) :: preprocess_value, compute_value, output_value
     integer :: order
-
-    this%case => case
 
     ! We default to preprocess every time-step
     call json_get_or_default(json, "preprocess_control", preprocess_control, &
@@ -208,23 +214,42 @@ contains
 
 
     if (output_control == "global") then
-       call json_get(this%case%params, 'case.fluid.output_control', &
-                     output_control)
-       call json_get(this%case%params, 'case.fluid.output_value', &
-                     output_value)
+       call json_get(case%params, 'case.fluid.output_control', output_control)
+       call json_get(case%params, 'case.fluid.output_value', output_value)
     end if
 
     call json_get_or_default(json, "order", order, -1)
+
+    call this%init_base_from_components(case, preprocess_control, &
+         preprocess_value, compute_control, compute_value, output_control, &
+         output_value, order)
+
+  end subroutine simulation_component_init_base
+
+  subroutine simulation_component_init_base_from_components(this, case, &
+       preprocess_control, preprocess_value, compute_control, compute_value, &
+       output_control, output_value, order)
+    class(simulation_component_t), intent(inout) :: this
+    class(case_t), intent(inout), target :: case
+    character(len=*), intent(in) :: preprocess_control
+    real(kind=rp), intent(in) :: preprocess_value
+    character(len=*), intent(in) :: compute_control
+    real(kind=rp), intent(in) :: compute_value
+    character(len=*), intent(in) :: output_control
+    real(kind=rp), intent(in) :: output_value
+    integer, intent(in) :: order
+
+    this%case => case
     this%order = order
 
     call this%preprocess_controller%init(case%end_time, preprocess_control, &
-                                         preprocess_value)
+         preprocess_value)
     call this%compute_controller%init(case%end_time, compute_control, &
-                                      compute_value)
+         compute_value)
     call this%output_controller%init(case%end_time, output_control, &
-                                     output_value)
+         output_value)
 
-  end subroutine simulation_component_init_base
+  end subroutine simulation_component_init_base_from_components
 
   !> Destructor for the `simulation_component_t` (base) class.
   subroutine simulation_component_free_base(this)
@@ -453,7 +478,7 @@ contains
     class(simulation_component_t), intent(in) :: object
     type(json_file), intent(inout) :: settings
 
-    class(simulation_component_wrapper_t), allocatable :: tmp_simcomps(:)
+    class(simulation_component_alloc_t), allocatable :: tmp_simcomps(:)
     integer :: i, position
 
     ! Find the first empty position
@@ -499,7 +524,7 @@ contains
     integer :: i, order, max_order
     logical :: order_found, previous_found
 
-    class(simulation_component_wrapper_t), allocatable :: tmp_simcomps(:)
+    class(simulation_component_alloc_t), allocatable :: tmp_simcomps(:)
     integer, allocatable :: order_list(:)
 
     ! Check that all components are initialized

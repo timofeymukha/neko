@@ -100,7 +100,7 @@ module neko
   use matrix, only : matrix_t
   use tensor
   use simulation_component, only : simulation_component_t, &
-       simulation_component_wrapper_t, neko_simcomps
+       simulation_component_alloc_t, neko_simcomps
   use probes, only : probes_t
   use spectral_error_indicator
   use system, only : system_cpu_name, system_cpuid
