@@ -1,7 +1,7 @@
 {
 "version": 1.0,
 "case": {
-    "mesh_file": "box.nmsh",
+    "mesh_file": "cylinder.nmsh",
     "output_at_end": true,
     "output_boundary": true,
     "output_checkpoints": true,
@@ -18,15 +18,16 @@
     },
     "fluid": {
         "scheme": "pnpn",
-        "Re": 2800,
+        "Re": 200,
         "initial_condition": {
-            "type": "user"
+            "type": "uniform",
+            "value": [1.0, 0.0, 0.0]
         },
         "velocity_solver": {
             "type": "cg",
             "preconditioner": "jacobi",
             "projection_space_size": 0,
-            "absolute_tolerance": 1e-4,
+            "absolute_tolerance": 1e-7,
             "max_iterations": 800
         },
         "pressure_solver": {
@@ -36,47 +37,35 @@
             "absolute_tolerance": 1e-3,
             "max_iterations": 800
         },
-        "flow_rate_force": {
-            "direction": 1,
-            "value": 1.0,
-            "use_averaged_flow": true
-        },
-        "boundary_types": ["", "", "w", "w"],
+        "boundary_types": ["v", "o+dong", "", "", "on", "on", "w"],
         "output_control": "simulationtime",
         "output_value": 2.0
     },
  "simulation_components": 
   [ 
     { 
-      "type": "lambda2", // stored in the temperature field, check docs for more details on sim_comps
+      "type": "lambda2",// stored in the temperature field, check docs for more details on sim_comps
+    },
+    { 
+      "type": "vorticity", // Stored in scalar 1,2,3. Changes order if simcomp is added before lambda2
     },
     {
       "type": "force_torque",
       "compute_control": "tsteps",
       "compute_value": 10,
-      "zone_id": 3,
-      "zone_name": "Bottom wall",
+      "zone_id": 7,
+      "zone_name": "Cylinder",
       "center": [0,0,0],
-      "scale": 0.01899, // 1 over area of wall (scale=1/(4pi*4/3pi))
-    },    
-    {
-      "type": "force_torque",
-      "compute_control": "tsteps",
-      "compute_value": 10,
-      "zone_id": 4,
-      "zone_name": "Top wall",
-      "center": [0,0,0],
-      "scale": 0.01899, // 1 over area of wall (scale=1/(4pi*4/3pi))
     },    
     { 
       "type": "fluid_stats",
       "output_control": "simulationtime",
-      "output_value": 5, // For example purposes we output relatively often, usually we do larger batches.
-      "start_time": 60, // Compute statistics after an initial transient of ~60 convective time units.
+      "output_value": 10,
+      "start_time": 50,
       "compute_control": "tsteps",
-      "compute_value": 50,
-      "avg_direction": "xz", // Computes average in homogenous directions xz.
-      "set_of_stats": "full"
+      "compute_value": 10,
+      "avg_direction": "z",
+      "set_of_stats": "basic"
     }
   ]   
 }
