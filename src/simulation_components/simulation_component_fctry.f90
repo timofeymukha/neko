@@ -102,6 +102,7 @@ contains
     end if
 
     ! Initialize
+    write(*,*) "Hi from factory"
     call object%init(json, case)
 
   end subroutine simulation_component_factory

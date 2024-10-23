@@ -94,7 +94,6 @@ module simulation_component
      procedure, pass(this) :: compute_
      !> The restart function to be called upon restarting simulation
      procedure, pass(this) :: restart_
-     procedure, pass(this) :: getter
   end type simulation_component_t
 
   !> A helper type that is needed to have an array of polymorphic objects
@@ -195,6 +194,7 @@ contains
          output_control
     real(kind=rp) :: preprocess_value, compute_value, output_value
     integer :: order
+    character(len=:), allocatable :: name
 
     ! We default to preprocess every time-step
     call json_get_or_default(json, "preprocess_control", preprocess_control, &
@@ -220,15 +220,18 @@ contains
 
     call json_get_or_default(json, "order", order, -1)
 
+    call json_get_or_default(json, "name", name, "simcomp")
+
+    write(*,*) "Hi from simcomp json"
     call this%init_base_from_components(case, preprocess_control, &
          preprocess_value, compute_control, compute_value, output_control, &
-         output_value, order)
+         output_value, order, name)
 
   end subroutine simulation_component_init_base
 
   subroutine simulation_component_init_base_from_components(this, case, &
        preprocess_control, preprocess_value, compute_control, compute_value, &
-       output_control, output_value, order)
+       output_control, output_value, order, name)
     class(simulation_component_t), intent(inout) :: this
     class(case_t), intent(inout), target :: case
     character(len=*), intent(in) :: preprocess_control
@@ -238,9 +241,13 @@ contains
     character(len=*), intent(in) :: output_control
     real(kind=rp), intent(in) :: output_value
     integer, intent(in) :: order
+    character(len=*), intent(inout) :: name
 
+    write(*,*) "Hi"
     this%case => case
     this%order = order
+    this%executor_ => neko_simcomps
+    write(*,*) "H2"
 
     call this%preprocess_controller%init(case%end_time, preprocess_control, &
          preprocess_value)
@@ -249,7 +256,37 @@ contains
     call this%output_controller%init(case%end_time, output_control, &
          output_value)
 
+    write(*,*) "Getting name"
+    call make_unique_name(this%executor_, name)
+    this%name = name
+    write(*,*) "My name is ", name
+
   end subroutine simulation_component_init_base_from_components
+
+  recursive subroutine make_unique_name(executor, name)
+    class(simcomp_executor_t), intent(in) :: executor
+    character(len=*), intent(inout) :: name
+    integer :: i
+    logical :: name_exists
+    character(len=:), allocatable :: new_name
+
+    ! Check if the name already exists in the name_list
+    name_exists = .false.
+    do i = 1, executor%n_simcomps
+       if (trim(name) == trim(executor%simcomps(i)%simcomp%name)) then
+           name_exists = .true.
+          exit
+       end if
+    end do
+
+    write(*,*) name, name_exists
+
+    if (.not. name_exists) return  ! Name is unique, return
+
+    ! If the name exists, add an underscore and recursively check again
+    new_name = trim(name) // '_'
+    call make_unique_name(executor, new_name)
+  end subroutine make_unique_name
 
   !> Destructor for the `simulation_component_t` (base) class.
   subroutine simulation_component_free_base(this)
@@ -332,16 +369,6 @@ contains
 
     ! Do nothing
   end subroutine compute_
-
-  subroutine getter(this, name, object)
-    class(simulation_component_t), intent(inout) :: this
-    character(len=20) :: name
-    class(*), pointer, intent(inout) :: object
-
-    ! Do nothing
-  end subroutine getter
-
-
 
   !
   ! simcomp_exectutor_t procedures

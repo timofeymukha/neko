@@ -84,7 +84,6 @@ module vorticity
      procedure, pass(this) :: free => vorticity_free
      !> Compute the vorticity field.
      procedure, pass(this) :: compute_ => vorticity_compute
-     procedure, pass(this) :: getter_ => vorticity_getter
   end type vorticity_t
 
   type interger_wrapper
@@ -99,6 +98,8 @@ contains
     type(json_file), intent(inout) :: json
     class(case_t), intent(inout), target :: case
     character(len=20) :: fields(3)
+
+    write(*,*) "Hi vorticity"
 
     ! Add fields keyword to the json so that the field_writer picks it up.
     ! Will also add fields to the registry.
@@ -160,16 +161,5 @@ contains
     call curl(this%omega_x, this%omega_y, this%omega_z, this%u, this%v, &
                  this%w, this%temp1, this%temp2, this%case%fluid%c_Xh)
   end subroutine vorticity_compute
-
-  subroutine vorticity_getter(this, name, object)
-    class(vorticity_t), intent(inout) :: this
-    character(len=20) :: name
-    class(*), pointer, intent(inout) :: object
-    type(interger_wrapper), target :: int
-
-
-    object => int
-    allocate(interger_wrapper::object)
-  end subroutine vorticity_getter
 
 end module vorticity
