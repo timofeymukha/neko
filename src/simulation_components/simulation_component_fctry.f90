@@ -1,4 +1,4 @@
-! Copyright (c) 2024, The Neko Authors
+! Copyright (c) 2025, The Neko Authors
 ! All rights reserved.
 !
 ! Redistribution and use in source and binary forms, with or without
@@ -44,10 +44,11 @@ submodule (simulation_component) simulation_component_fctry
   use weak_grad, only : weak_grad_t
   use derivative, only : derivative_t
   use spectral_error, only: spectral_error_t
+  use mass_flux, only : mass_flux_t
   use utils, only : neko_type_error
 
   ! List of all possible types created by the factory routine
-  character(len=20) :: SIMCOMPS_KNOWN_TYPES(9) = [character(len=20) :: &
+  character(len=20) :: SIMCOMPS_KNOWN_TYPES(10) = [character(len=20) :: &
        "vorticity", &
        "lambda2", &
        "probes", &
@@ -56,6 +57,7 @@ submodule (simulation_component) simulation_component_fctry
        "fluid_stats", &
        "weak_grad", &
        "force_torque", &
+       "mass_flux", &
        "spectral_error"]
 
 contains
@@ -113,6 +115,8 @@ contains
        allocate(force_torque_t::object)
     case ("fluid_stats")
        allocate(fluid_stats_simcomp_t::object)
+    case ("mass_flux")
+       allocate(mass_flux_t::object)
     case ("spectral_error")
        allocate(spectral_error_t::object)
     case default
