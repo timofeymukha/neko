@@ -387,6 +387,7 @@ neko_fortran_SOURCES = \
 	les/bcknd/device/sigma_device.f90\
 	les/bcknd/device/device_sigma_nut.F90\
 	les/wale.f90\
+	les/spalart_allmaras.f90\
 	les/bcknd/cpu/wale_cpu.f90\
 	les/bcknd/device/wale_device.f90\
 	les/bcknd/device/device_wale_nut.F90\
