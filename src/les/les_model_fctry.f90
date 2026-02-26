@@ -35,18 +35,20 @@ submodule (les_model) les_model_fctry
   use smagorinsky, only : smagorinsky_t
   use dynamic_smagorinsky, only : dynamic_smagorinsky_t
   use sigma, only : sigma_t
+  use spalart_allmaras, only : spalart_allmaras_t
   use fluid_scheme_base, only : fluid_scheme_base_t
   use wale, only : wale_t
   use utils, only : neko_type_registration_error
   implicit none
 
   ! List of all possible types created by the factory routine
-  character(len=20) :: LES_KNOWN_TYPES(5) = [character(len=20) :: &
+  character(len=20) :: LES_KNOWN_TYPES(6) = [character(len=20) :: &
        "vreman", &
        "smagorinsky", &
        "dymamic_smagorinsky", &
        "sigma", &
-       "wale"]
+       "wale", &
+       "spalart_allmaras"]
 
 contains
   !> LES model factory.
@@ -91,6 +93,8 @@ contains
        allocate(sigma_t::object)
     case ('wale')
        allocate(wale_t::object)
+    case ('spalart_allmaras')
+       allocate(spalart_allmaras_t::object)
     case default
        do i = 1, les_model_registry_size
           if (trim(type_name) == trim(les_model_registry(i)%type_name)) then
