@@ -1,4 +1,4 @@
-! Copyright (c) 2024-2026, The Neko Authors
+! Copyright (c) 2026, The Neko Authors
 ! All rights reserved.
 !
 ! Redistribution and use in source and binary forms, with or without
@@ -50,7 +50,6 @@ module spalart_allmaras
   use gs_ops, only : GS_OP_MIN
   implicit none
   private
-  character(len=*), parameter :: WALL_DISTANCE_FIELD_NAME = "wall_distance"
 
   !> Implements the Spalart-Allmaras RANS model.
   !! @note The scalar equation itself is solved outside this model.
@@ -162,9 +161,6 @@ contains
     call neko_log%message(log_buf)
     write(log_buf, '(A, A)') 'Source field : ', source_field_name
     call neko_log%message(log_buf)
-    write(log_buf, '(A, A)') 'Wall distance field : ', &
-         WALL_DISTANCE_FIELD_NAME
-    call neko_log%message(log_buf)
     write(log_buf, '(A, L1)') 'extrapolation : ', if_ext
     call neko_log%message(log_buf)
     call neko_log%end_section()
@@ -245,17 +241,21 @@ contains
 
     call neko_registry%add_field(fluid%dm_Xh, trim(this%source_field_name), &
          ignore_existing = .true.)
+
+    call neko_registry%add_field(fluid%dm_Xh, "wall_distance", &
+         ignore_existing = .true.)
+
+    wall_distance => &
+         neko_registry%get_field_by_name("wall_distance")
+
     this%source_field => &
          neko_registry%get_field_by_name(trim(this%source_field_name))
 
-    call neko_registry%add_field(fluid%dm_Xh, &
-         WALL_DISTANCE_FIELD_NAME, ignore_existing = .true.)
-    wall_distance => &
-         neko_registry%get_field_by_name(WALL_DISTANCE_FIELD_NAME)
     if (size(this%wall_distance_zone_indices) .eq. 0) then
        call neko_error("Spalart-Allmaras requires " // &
             "wall_distance_zone_indices")
     end if
+
     wall_distance_vec(1:wall_distance%size()) => wall_distance%x
     call this%compute_cheap_dist(wall_distance_vec)
 
@@ -291,7 +291,7 @@ contains
 
     type(field_t), pointer :: u, v, w, u_e, v_e, w_e
     type(field_t), pointer :: u_work, v_work, w_work
-    type(field_t), pointer :: scalar, wall_distance
+    type(field_t), pointer :: scalar, source, wall_distance
     type(field_t), pointer :: du_dx, du_dy, du_dz
     type(field_t), pointer :: dv_dx, dv_dy, dv_dz
     type(field_t), pointer :: dw_dx, dw_dy, dw_dz
@@ -336,8 +336,11 @@ contains
     end if
 
     scalar => neko_registry%get_field_by_name(trim(this%scalar_field_name))
+    source => neko_registry%get_field_by_name(trim(this%source_field_name))
+
     wall_distance => &
-         neko_registry%get_field_by_name(WALL_DISTANCE_FIELD_NAME)
+         neko_registry%get_field_by_name("wall_distance")
+
     if (.not. associated(this%mu) .or. .not. associated(this%rho)) then
        call neko_error("Spalart-Allmaras model requires associated " // &
             "fluid mu and rho fields")
@@ -384,6 +387,7 @@ contains
 
     cw3_6 = this%cw3**6
 
+
     do e = 1, this%coef%msh%nelv
        do k = 1, this%coef%Xh%lz
           do j = 1, this%coef%Xh%ly
@@ -424,7 +428,7 @@ contains
                 g6 = g**6
                 fw = g * ((1.0_rp + cw3_6) / (g6 + cw3_6))**(1.0_rp / 6.0_rp)
 
-                this%source_field%x(i, j, k, e) = &
+                source%x(i, j, k, e) = &
                      this%cb1 * (1.0_rp - ft2) * s_tilde * nu_tilde + &
                      (this%cb2 / this%sigma_sa) * grad_sq - &
                      (this%cw1 * fw - (this%cb1 / this%kappa**2) * ft2) * &
@@ -439,6 +443,8 @@ contains
     end do
 
     call neko_scratch_registry%relinquish_field(idx)
+
+    write(*,*) this%source_field%x(1:5,1,1,1)
 
   end subroutine spalart_allmaras_compute
 
