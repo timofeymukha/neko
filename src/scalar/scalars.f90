@@ -35,7 +35,7 @@
 module scalars
   use num_types, only : rp
   use scalar_pnpn, only : scalar_pnpn_t
-  use scalar_scheme, only : scalar_scheme_wrapper_t
+  use scalar_scheme, only : scalar_scheme_wrapper_t, scalar_scheme_t
   use scalar_aux, only : scalar_step_info
   use mesh, only : mesh_t
   use space, only : space_t
@@ -74,6 +74,8 @@ module scalars
      procedure :: restart => scalars_restart
      !> Check if the configuration is valid
      procedure :: validate => scalars_validate
+     !> Retrieve a scalar scheme by its configured name.
+     procedure :: get_scheme_by_name => scalars_get_scheme_by_name
      !> Clean up all resources
      procedure :: free => scalars_free
      !> Register scalar lag fields with checkpoint
@@ -81,6 +83,30 @@ module scalars
   end type scalars_t
 
 contains
+
+  !> Retrieve a scalar scheme by its configured name.
+  function scalars_get_scheme_by_name(this, scheme_name) result(scheme)
+    class(scalars_t), target, intent(inout) :: this
+    character(len=*), intent(in) :: scheme_name
+    class(scalar_scheme_t), pointer :: scheme
+    integer :: i
+
+    nullify(scheme)
+
+    if (.not. allocated(this%scalar_fields)) then
+       call neko_error("No scalar schemes have been initialized")
+    end if
+
+    do i = 1, size(this%scalar_fields)
+       if (trim(this%scalar_fields(i)%scalar%name) == trim(scheme_name)) then
+          scheme => this%scalar_fields(i)%scalar
+          return
+       end if
+    end do
+
+    call neko_error("Could not find scalar scheme with name " // &
+         trim(scheme_name))
+  end function scalars_get_scheme_by_name
 
   !> Initialize the scalars container
   subroutine scalars_init(this, n_scalars, msh, coef, gs, params, &

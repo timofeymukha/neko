@@ -38,6 +38,11 @@ module deardorff
   use field, only : field_t
   use fluid_scheme_base, only : fluid_scheme_base_t
   use les_model, only : les_model_t
+  use scalar_scheme, only : scalar_scheme_t
+  use scalars, only : scalars_t
+  use source_term, only : source_term_t
+  use field_list, only : field_list_t
+  use field_source_term, only : field_source_term_t
   use json_utils, only : json_get_or_default, json_get, json_get_or_lookup
   use json_module, only : json_file
   use neko_config, only : NEKO_BCKND_DEVICE
@@ -74,6 +79,9 @@ module deardorff
           deardorff_init_from_components
      !> Destructor.
      procedure, pass(this) :: free => deardorff_free
+     !> Configure the TKE equation coupled to the model.
+     procedure, pass(this) :: configure_equations => &
+          deardorff_configure_equations
      !> Compute eddy viscosity.
      procedure, pass(this) :: compute => deardorff_compute
   end type deardorff_t
@@ -216,6 +224,45 @@ contains
 
     call this%free_base()
   end subroutine deardorff_free
+
+  !> Configure the equations coupled to the Deardorff model.
+  subroutine deardorff_configure_equations(this, fluid, scalars)
+    class(deardorff_t), intent(inout) :: this
+    class(fluid_scheme_base_t), intent(inout), target :: fluid
+    type(scalars_t), intent(inout), optional, target :: scalars
+    class(scalar_scheme_t), pointer :: scheme
+    class(source_term_t), allocatable :: source_term
+    type(field_list_t) :: rhs_fields
+    character(len=len_trim(this%TKE_source%name)) :: field_names(1)
+
+    if (.not. present(scalars)) then
+       call neko_error("The Deardorff model requires a scalar equation for " // &
+            trim(this%TKE_field_name))
+    end if
+
+    if (.not. associated(this%TKE_source)) then
+       call neko_error("The Deardorff TKE source field is not initialized")
+    end if
+
+    scheme => scalars%get_scheme_by_name(this%TKE_field_name)
+    if (.not. associated(scheme%f_Xh)) then
+       call neko_error("The scalar scheme RHS field is not initialized")
+    end if
+
+    field_names(1) = trim(this%TKE_source%name)
+    call rhs_fields%init(1)
+    call rhs_fields%assign(1, scheme%f_Xh)
+
+    allocate(field_source_term_t::source_term)
+    select type (source_term)
+    type is (field_source_term_t)
+       call source_term%init_from_compenents(rhs_fields, field_names, &
+            scheme%c_Xh, 0.0_rp, huge(0.0_rp))
+    end select
+
+    call scheme%source_term%add(source_term)
+    call rhs_fields%free()
+  end subroutine deardorff_configure_equations
 
   !> Compute eddy viscosity.
   !! @param t The time value.

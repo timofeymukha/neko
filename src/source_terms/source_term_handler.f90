@@ -33,20 +33,21 @@
 !
 !> Implements the `source_term_handler_t` type.
 module source_term_handler
-  use neko_config, only: NEKO_BCKND_DEVICE
-  use num_types, only: rp
-  use source_term, only: source_term_wrapper_t, source_term_t, &
+  use neko_config, only : NEKO_BCKND_DEVICE
+  use num_types, only : rp
+  use source_term, only : source_term_wrapper_t, source_term_t, &
        source_term_factory
-  use field, only: field_t
-  use field_list, only: field_list_t
-  use json_utils, only: json_get, json_extract_item, json_get_or_default
-  use json_module, only: json_file
-  use coefs, only: coef_t
-  use user_intf, only: user_t
-  use field_math, only: field_rzero
+  use field, only : field_t
+  use field_list, only : field_list_t
+  use json_utils, only : json_get, json_extract_item, json_get_or_default
+  use json_module, only : json_file
+  use coefs, only : coef_t
+  use user_intf, only : user_t
+  use field_math, only : field_rzero
   use math, only : col2
   use device_math, only : device_col2
   use time_state, only : time_state_t
+  use utils, only : neko_error
   implicit none
   private
 
@@ -248,6 +249,21 @@ contains
     class(source_term_wrapper_t), dimension(:), allocatable :: temp
 
     integer :: n_sources, i
+    type(field_t), pointer :: handler_field, source_field
+
+    if (source_term%fields%size() .ne. this%rhs_fields%size()) then
+       call neko_error("Programmatically added source term has an " // &
+            "incompatible number of RHS fields")
+    end if
+
+    do i = 1, this%rhs_fields%size()
+       handler_field => this%rhs_fields%get(i)
+       source_field => source_term%fields%items(i)%ptr
+       if (.not. associated(source_field, handler_field)) then
+          call neko_error("Programmatically added source term targets a " // &
+               "different RHS field than its handler")
+       end if
+    end do
 
     if (allocated(this%source_terms)) then
        n_sources = size(this%source_terms)

@@ -94,6 +94,11 @@ contains
     this%name = name
 
     call les_model_factory(this%les_model, model_name, case%fluid, json)
+    if (allocated(case%scalars)) then
+       call this%les_model%configure_equations(case%fluid, case%scalars)
+    else
+       call this%les_model%configure_equations(case%fluid)
+    end if
   end subroutine les_simcomp_init_from_json
 
   !> Destructor.

@@ -36,6 +36,7 @@ module les_model
   use num_types, only : rp
   use fluid_scheme_base, only : fluid_scheme_base_t
   use fluid_pnpn, only : fluid_pnpn_t
+  use scalars, only : scalars_t
   use time_scheme_controller, only : time_scheme_controller_t
   use rhs_maker, only : rhs_maker_sumab_t, rhs_maker_sumab_fctry
   use field, only : field_t
@@ -85,6 +86,9 @@ module les_model
      procedure, pass(this) :: init_base => les_model_init_base
      !> Destructor for the les_model_t (base) class.
      procedure, pass(this) :: free_base => les_model_free_base
+     !> Configure auxiliary equations coupled to the LES model.
+     procedure, pass(this) :: configure_equations => &
+          les_model_configure_equations
      !> Compute the LES length-scale
      procedure, pass(this) :: compute_delta => les_model_compute_delta
      !> The common constructor.
@@ -193,6 +197,13 @@ module les_model
 
 
 contains
+  !> Configure equations coupled to the LES model.
+  subroutine les_model_configure_equations(this, fluid, scalars)
+    class(les_model_t), intent(inout) :: this
+    class(fluid_scheme_base_t), intent(inout), target :: fluid
+    type(scalars_t), intent(inout), optional, target :: scalars
+  end subroutine les_model_configure_equations
+
   !> Constructor for the les_model_t (base) class.
   !! @param fluid The fluid_scheme_t object.
   !! @param nu_name The name of the turbulent viscosity field.
