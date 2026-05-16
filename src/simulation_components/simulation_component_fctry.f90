@@ -53,12 +53,14 @@ submodule (simulation_component) simulation_component_fctry
   use spectral_error, only : spectral_error_t
   use data_streamer_simcomp, only : data_streamer_simcomp_t
   use field_subsampler, only : field_subsampler_t
+  use volume_operation, only : volume_operation_t
   use utils, only : neko_type_error, neko_type_registration_error
   implicit none
 
   ! List of all possible types created by the factory routine
-  character(len=20) :: SIMCOMPS_KNOWN_TYPES(19) = [character(len=20) :: &
+  character(len=20) :: SIMCOMPS_KNOWN_TYPES(20) = [character(len=20) :: &
        "boundary_operation", &
+       "volume_operation", &
        "lambda2", &
        "probes", &
        "les_model", &
@@ -123,6 +125,8 @@ contains
     select case (trim(type_name))
     case ("boundary_operation")
        allocate(boundary_operation_t::object)
+    case ("volume_operation")
+       allocate(volume_operation_t::object)
     case ("lambda2")
        allocate(lambda2_t::object)
     case ("probes")
