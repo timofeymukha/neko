@@ -315,7 +315,11 @@ contains
     if (this%use_point_zone) then
        n_pts = this%point_zone_mask_%size()
     end if
-    write(log_buf, '(A,I0)') "Selected volume quadrature points: ", n_pts
+    n_pts_global = n_pts
+    call MPI_Allreduce(MPI_IN_PLACE, n_pts_global, 1, MPI_INTEGER, MPI_SUM, &
+         NEKO_COMM, ierr)
+    write(log_buf, '(A,I0)') "Selected volume quadrature points: ", &
+         n_pts_global
     call neko_log%message(log_buf)
     call neko_log%end_section()
 

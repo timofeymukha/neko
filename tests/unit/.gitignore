@@ -72,3 +72,4 @@ point_interpolation/point_interpolation_suite
 templates/parallel/parallel_suite
 templates/serial/serial_test
 boundary_operation/boundary_operation_suite
+volume_operation/volume_operation_suite

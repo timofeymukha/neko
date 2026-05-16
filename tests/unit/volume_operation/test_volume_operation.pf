@@ -1,0 +1,427 @@
+module test_volume_operation
+  use mpi
+  use pfunit
+  use volume_operation, only : volume_operation_t
+  use fluid_pnpn, only : fluid_pnpn_t
+  use field, only : field_t
+  use mesh, only : mesh_t
+  use point, only : point_t
+  use space, only : space_t, GLL
+  use dofmap, only : dofmap_t
+  use gather_scatter, only : gs_t
+  use coefs, only : coef_t
+  use time_state, only : time_state_t
+  use num_types, only : rp
+  use case, only : case_t
+  use comm, only : comm_init
+  use device, only : device_init, device_finalize, HOST_TO_DEVICE
+  use neko_config, only : NEKO_BCKND_DEVICE
+  use neko_mpi_types, only : neko_mpi_types_init
+  use registry, only : neko_registry
+  use point_zone_registry, only : neko_point_zone_registry
+  use json_module, only : json_file
+  implicit none
+
+  integer, parameter :: lx_test = 3
+  character(len=*), parameter :: left_half_zone_name = "left_half"
+  character(len=*), parameter :: empty_registry_json = &
+       '{"case":{"numerics":{"polynomial_order":2}}}'
+
+  @TestCase
+  type, extends(MPITestCase) :: test_volume_operation_case
+   contains
+     procedure :: setUp
+     procedure :: tearDown
+  end type test_volume_operation_case
+
+contains
+
+  subroutine setUp(this)
+    class(test_volume_operation_case), intent(inout) :: this
+
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_init
+    end if
+
+    call comm_init
+    call neko_mpi_types_init()
+  end subroutine setUp
+
+  subroutine tearDown(this)
+    class(test_volume_operation_case), intent(inout) :: this
+
+    call neko_point_zone_registry%free()
+    call neko_registry%free()
+
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_finalize
+    end if
+  end subroutine tearDown
+
+  !> Verify the default flags and cached values on a fresh simcomp.
+  @test(npes=[1])
+  subroutine test_defaults(this)
+    class(test_volume_operation_case), intent(inout) :: this
+    type(volume_operation_t) :: simcomp
+
+    @assertTrue(simcomp%log)
+    @assertFalse(simcomp%use_point_zone)
+    @assertFalse(simcomp%csv_output_enabled)
+    @assertFalse(simcomp%compute_integral)
+    @assertFalse(simcomp%compute_average)
+    @assertFalse(simcomp%compute_min)
+    @assertFalse(simcomp%compute_max)
+    @assertEqual(0.0_rp, simcomp%integral)
+    @assertEqual(0.0_rp, simcomp%average)
+    @assertTrue(simcomp%minimum > 0.0_rp)
+    @assertTrue(simcomp%maximum < 0.0_rp)
+  end subroutine test_defaults
+
+  !> Verify all-node construction keeps the requested subset and CSV state.
+  @test(npes=[1])
+  subroutine test_init_all_nodes_subset(this)
+    class(test_volume_operation_case), intent(inout) :: this
+    type(mesh_t) :: msh
+    type(space_t) :: Xh
+    type(dofmap_t) :: dof
+    type(gs_t) :: gs
+    type(case_t), target :: test_case
+    type(field_t), pointer :: reg_field
+    type(volume_operation_t) :: simcomp
+    character(len=16) :: operations(2)
+    character(len=*), parameter :: output_filename = "volume_operation_all.csv"
+
+    call remove_file_if_exists(output_filename)
+
+    allocate(fluid_pnpn_t :: test_case%fluid)
+    select type(fluid => test_case%fluid)
+    type is (fluid_pnpn_t)
+       call build_simple_mesh_fixture(msh, Xh, dof, gs, fluid%c_Xh)
+    end select
+
+    call neko_registry%init()
+    call neko_registry%add_field(dof, "u")
+    reg_field => neko_registry%get_field_by_name("u")
+    reg_field%x = dof%x
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call reg_field%copy_from(HOST_TO_DEVICE, .true.)
+    end if
+
+    call test_case%time%init(0.0_rp, 1.0_rp, 0.1_rp)
+    operations = [character(len=16) :: "max", "integral"]
+    call simcomp%init_from_components("volume_operation_all", test_case, 9, &
+         "tsteps", 1.0_rp, "tsteps", 1.0_rp, "tsteps", 1.0_rp, &
+         "u", operations, .false., output_filename = output_filename)
+
+    @assertEqual("volume_operation_all", simcomp%name)
+    @assertEqual(9, simcomp%order)
+    @assertFalse(simcomp%log)
+    @assertFalse(simcomp%use_point_zone)
+    @assertFalse(allocated(simcomp%point_zone_name))
+    @assertTrue(simcomp%compute_integral)
+    @assertFalse(simcomp%compute_average)
+    @assertFalse(simcomp%compute_min)
+    @assertTrue(simcomp%compute_max)
+    @assertEqual(2, size(simcomp%operations))
+    @assertEqual("max", trim(simcomp%operations(1)))
+    @assertEqual("integral", trim(simcomp%operations(2)))
+    @assertTrue(associated(simcomp%field, reg_field))
+    @assertTrue(simcomp%csv_output_enabled)
+    @assertEqual(4, simcomp%csv_row%size())
+    @assertEqual(output_filename, trim(simcomp%csv_output%get_fname()))
+
+    call simcomp%free()
+    call remove_file_if_exists(output_filename)
+    select type(fluid => test_case%fluid)
+    type is (fluid_pnpn_t)
+       call fluid%c_Xh%free()
+    end select
+    deallocate(test_case%fluid)
+    call gs%free()
+    call dof%free()
+    call Xh%free()
+    call msh%free()
+  end subroutine test_init_all_nodes_subset
+
+  !> Verify all-node reductions use every GLL point by default.
+  @test(npes=[1])
+  subroutine test_compute_all_nodes(this)
+    class(test_volume_operation_case), intent(inout) :: this
+    type(mesh_t) :: msh
+    type(space_t) :: Xh
+    type(dofmap_t) :: dof
+    type(gs_t) :: gs
+    type(case_t), target :: test_case
+    type(field_t), pointer :: reg_field
+    type(volume_operation_t) :: simcomp
+    type(time_state_t) :: time
+    character(len=16) :: operations(4)
+    real(kind=rp) :: tol
+
+    tol = unit_tol()
+
+    allocate(fluid_pnpn_t :: test_case%fluid)
+    select type(fluid => test_case%fluid)
+    type is (fluid_pnpn_t)
+       call build_simple_mesh_fixture(msh, Xh, dof, gs, fluid%c_Xh)
+    end select
+
+    call neko_registry%init()
+    call neko_registry%add_field(dof, "u")
+    reg_field => neko_registry%get_field_by_name("u")
+    reg_field%x = dof%x
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call reg_field%copy_from(HOST_TO_DEVICE, .true.)
+    end if
+
+    call test_case%time%init(0.0_rp, 1.0_rp, 0.1_rp)
+    operations = [character(len=16) :: "integral", "average", "min", "max"]
+    call simcomp%init_from_components("volume_operation_all_compute", test_case, &
+         3, "tsteps", 1.0_rp, "tsteps", 1.0_rp, "tsteps", 1.0_rp, &
+         "u", operations, .false.)
+
+    call time%init(0.0_rp, 1.0_rp, 0.1_rp)
+    time%tstep = 1
+    time%t = 0.1_rp
+    call simcomp%compute_(time)
+
+    @assertEqual(2.0_rp, simcomp%integral, tolerance = tol)
+    @assertEqual(1.0_rp, simcomp%average, tolerance = tol)
+    @assertEqual(0.0_rp, simcomp%minimum, tolerance = tol)
+    @assertEqual(2.0_rp, simcomp%maximum, tolerance = tol)
+
+    call simcomp%free()
+    select type(fluid => test_case%fluid)
+    type is (fluid_pnpn_t)
+       call fluid%c_Xh%free()
+    end select
+    deallocate(test_case%fluid)
+    call gs%free()
+    call dof%free()
+    call Xh%free()
+    call msh%free()
+  end subroutine test_compute_all_nodes
+
+  !> Verify named point-zone setup keeps the selector and output order.
+  @test(npes=[1])
+  subroutine test_init_point_zone_subset(this)
+    class(test_volume_operation_case), intent(inout) :: this
+    type(mesh_t) :: msh
+    type(space_t) :: Xh
+    type(dofmap_t) :: dof
+    type(gs_t) :: gs
+    type(case_t), target :: test_case
+    type(field_t), pointer :: reg_field
+    type(volume_operation_t) :: simcomp
+    character(len=16) :: operations(2)
+
+    allocate(fluid_pnpn_t :: test_case%fluid)
+    select type(fluid => test_case%fluid)
+    type is (fluid_pnpn_t)
+       call build_simple_mesh_fixture(msh, Xh, dof, gs, fluid%c_Xh)
+    end select
+
+    call neko_registry%init()
+    call neko_registry%add_field(dof, "u")
+    reg_field => neko_registry%get_field_by_name("u")
+    reg_field%x = dof%x
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call reg_field%copy_from(HOST_TO_DEVICE, .true.)
+    end if
+
+    call init_empty_point_zone_registry(msh)
+    call add_left_half_point_zone(dof)
+
+    call test_case%time%init(0.0_rp, 1.0_rp, 0.1_rp)
+    operations = [character(len=16) :: "max", "average"]
+    call simcomp%init_from_components("volume_operation_zone", test_case, 4, &
+         "tsteps", 1.0_rp, "tsteps", 1.0_rp, "tsteps", 1.0_rp, &
+         "u", operations, .false., left_half_zone_name)
+
+    @assertFalse(simcomp%log)
+    @assertTrue(simcomp%use_point_zone)
+    @assertTrue(allocated(simcomp%point_zone_name))
+    @assertEqual(left_half_zone_name, trim(simcomp%point_zone_name))
+    @assertFalse(simcomp%compute_integral)
+    @assertTrue(simcomp%compute_average)
+    @assertFalse(simcomp%compute_min)
+    @assertTrue(simcomp%compute_max)
+    @assertEqual("max", trim(simcomp%operations(1)))
+    @assertEqual("average", trim(simcomp%operations(2)))
+    @assertTrue(associated(simcomp%field, reg_field))
+    @assertFalse(simcomp%csv_output_enabled)
+
+    call simcomp%free()
+    select type(fluid => test_case%fluid)
+    type is (fluid_pnpn_t)
+       call fluid%c_Xh%free()
+    end select
+    deallocate(test_case%fluid)
+    call gs%free()
+    call dof%free()
+    call Xh%free()
+    call msh%free()
+  end subroutine test_init_point_zone_subset
+
+  !> Verify point-zone reductions and CSV rows follow requested ordering.
+  @test(npes=[1])
+  subroutine test_compute_point_zone_and_csv(this)
+    class(test_volume_operation_case), intent(inout) :: this
+    type(mesh_t) :: msh
+    type(space_t) :: Xh
+    type(dofmap_t) :: dof
+    type(gs_t) :: gs
+    type(case_t), target :: test_case
+    type(field_t), pointer :: reg_field
+    type(volume_operation_t) :: simcomp
+    type(time_state_t) :: time
+    character(len=16) :: operations(4)
+    character(len=*), parameter :: output_filename = "volume_operation_zone.csv"
+    real(kind=rp) :: tol
+
+    tol = unit_tol()
+    call remove_file_if_exists(output_filename)
+
+    allocate(fluid_pnpn_t :: test_case%fluid)
+    select type(fluid => test_case%fluid)
+    type is (fluid_pnpn_t)
+       call build_simple_mesh_fixture(msh, Xh, dof, gs, fluid%c_Xh)
+    end select
+
+    call neko_registry%init()
+    call neko_registry%add_field(dof, "u")
+    reg_field => neko_registry%get_field_by_name("u")
+    reg_field%x = dof%x
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call reg_field%copy_from(HOST_TO_DEVICE, .true.)
+    end if
+
+    call init_empty_point_zone_registry(msh)
+    call add_left_half_point_zone(dof)
+
+    call test_case%time%init(0.0_rp, 1.0_rp, 0.1_rp)
+    operations = [character(len=16) :: "max", "integral", "average", "min"]
+    call simcomp%init_from_components("volume_operation_zone_compute", test_case, &
+         5, "tsteps", 1.0_rp, "tsteps", 1.0_rp, "tsteps", 1.0_rp, "u", &
+         operations, .false., left_half_zone_name, output_filename)
+
+    call time%init(0.0_rp, 1.0_rp, 0.1_rp)
+    time%tstep = 1
+    time%t = 0.1_rp
+    call simcomp%compute_(time)
+
+    @assertEqual(0.5_rp, simcomp%maximum, tolerance = tol)
+    @assertEqual((1.0_rp / 3.0_rp), simcomp%integral, tolerance = tol)
+    @assertEqual(0.4_rp, simcomp%average, tolerance = tol)
+    @assertEqual(0.0_rp, simcomp%minimum, tolerance = tol)
+    @assertTrue(simcomp%csv_output_enabled)
+    @assertEqual(6, simcomp%csv_row%size())
+    @assertEqual(1.0_rp, simcomp%csv_row%x(1), tolerance = tol)
+    @assertEqual(0.1_rp, simcomp%csv_row%x(2), tolerance = tol)
+    @assertEqual(0.5_rp, simcomp%csv_row%x(3), tolerance = tol)
+    @assertEqual((1.0_rp / 3.0_rp), simcomp%csv_row%x(4), tolerance = tol)
+    @assertEqual(0.4_rp, simcomp%csv_row%x(5), tolerance = tol)
+    @assertEqual(0.0_rp, simcomp%csv_row%x(6), tolerance = tol)
+
+    call simcomp%free()
+    call remove_file_if_exists(output_filename)
+    select type(fluid => test_case%fluid)
+    type is (fluid_pnpn_t)
+       call fluid%c_Xh%free()
+    end select
+    deallocate(test_case%fluid)
+    call gs%free()
+    call dof%free()
+    call Xh%free()
+    call msh%free()
+  end subroutine test_compute_point_zone_and_csv
+
+  subroutine init_empty_point_zone_registry(msh)
+    type(mesh_t), intent(inout) :: msh
+    type(json_file) :: registry_json
+
+    call registry_json%load_from_string(empty_registry_json)
+    call neko_point_zone_registry%init(registry_json, msh)
+    call registry_json%destroy()
+  end subroutine init_empty_point_zone_registry
+
+  subroutine add_left_half_point_zone(dof)
+    type(dofmap_t), intent(inout) :: dof
+    type(json_file) :: zone_json
+
+    call zone_json%load_from_string( &
+         '{"name":"left_half","geometry":"box","x_bounds":[0.0,0.5],' // &
+         '"y_bounds":[0.0,1.0],"z_bounds":[0.0,1.0]}' )
+    call neko_point_zone_registry%add_point_zone(zone_json, dof)
+    call zone_json%destroy()
+  end subroutine add_left_half_point_zone
+
+  subroutine build_simple_mesh_fixture(msh, Xh, dof, gs, coef)
+    type(mesh_t), intent(inout) :: msh
+    type(space_t), intent(inout) :: Xh
+    type(dofmap_t), intent(inout) :: dof
+    type(gs_t), intent(inout) :: gs
+    type(coef_t), intent(inout) :: coef
+    type(point_t) :: p(12)
+
+    call p(1)%init(0d0, 0d0, 0d0)
+    call p(1)%set_id(1)
+    call p(2)%init(1d0, 0d0, 0d0)
+    call p(2)%set_id(2)
+    call p(3)%init(0d0, 1d0, 0d0)
+    call p(3)%set_id(4)
+    call p(4)%init(1d0, 1d0, 0d0)
+    call p(4)%set_id(3)
+    call p(5)%init(0d0, 0d0, 1d0)
+    call p(5)%set_id(5)
+    call p(6)%init(1d0, 0d0, 1d0)
+    call p(6)%set_id(6)
+    call p(7)%init(0d0, 1d0, 1d0)
+    call p(7)%set_id(7)
+    call p(8)%init(1d0, 1d0, 1d0)
+    call p(8)%set_id(8)
+    call p(9)%init(2d0, 0d0, 0d0)
+    call p(9)%set_id(9)
+    call p(10)%init(2d0, 1d0, 0d0)
+    call p(10)%set_id(10)
+    call p(11)%init(2d0, 0d0, 1d0)
+    call p(11)%set_id(11)
+    call p(12)%init(2d0, 1d0, 1d0)
+    call p(12)%set_id(12)
+
+    call msh%init(3, 2)
+    call msh%add_element(1, 1, p(1), p(2), p(3), p(4), &
+         p(5), p(6), p(7), p(8))
+    call msh%add_element(2, 2, p(2), p(9), p(4), p(10), &
+         p(6), p(11), p(8), p(12))
+    call msh%generate_conn()
+
+    call Xh%init(GLL, lx_test, lx_test, lx_test)
+    call dof%init(msh, Xh)
+    call gs%init(dof)
+    call coef%init(gs)
+  end subroutine build_simple_mesh_fixture
+
+  subroutine remove_file_if_exists(fname)
+    character(len=*), intent(in) :: fname
+    logical :: exists
+    integer :: unit
+
+    inquire(file = fname, exist = exists)
+    if (.not. exists) return
+
+    open(newunit = unit, file = fname, status = "old")
+    close(unit, status = "delete")
+  end subroutine remove_file_if_exists
+
+  pure function unit_tol() result(tol)
+    real(kind=rp) :: tol
+
+    if (precision(1.0_rp) > 6) then
+       tol = 1.0e-12_rp
+    else
+       tol = 1.0e-5_rp
+    end if
+  end function unit_tol
+
+end module test_volume_operation
