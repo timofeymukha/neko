@@ -172,6 +172,7 @@ contains
     logical, intent(in) :: log
     character(len=*), intent(in), optional :: output_filename
     character(len=:), allocatable :: csv_header
+    character(len=:), allocatable :: output_filename_
     character(len=LOG_SIZE) :: log_buf
     integer :: i
     integer :: n_pts
@@ -237,12 +238,18 @@ contains
             this%coef%Xh%lz, n_pts)
     end if
 
-    if (present(output_filename)) then
+    if (this%log) then
+       if (present(output_filename)) then
+          output_filename_ = trim(output_filename)
+       else
+          output_filename_ = trim(this%name) // ".csv"
+       end if
+
        csv_header = "tstep,time"
        do i = 1, size(this%operations)
           csv_header = trim(csv_header) // "," // trim(this%operations(i))
        end do
-       call this%csv_output%init(trim(output_filename), header = &
+       call this%csv_output%init(trim(output_filename_), header = &
             trim(csv_header), overwrite = .true.)
        call this%csv_row%init(2 + size(this%operations))
        this%csv_output_enabled = .true.
@@ -264,6 +271,8 @@ contains
          this%bc%msk(0)
     call neko_log%message(log_buf)
     call neko_log%end_section()
+
+    if (allocated(output_filename_)) deallocate(output_filename_)
   end subroutine boundary_operation_init_common
 
   !> Construct from explicit time-based controllers.

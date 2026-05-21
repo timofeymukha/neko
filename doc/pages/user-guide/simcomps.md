@@ -218,7 +218,8 @@ Optional fields for this simcomp are:
   time the simcomp computes.
 - `output_filename`: if set to a `.csv` file, write `tstep`, `time`, and the
   requested operations to that file. These writes respect `output_control` and
-  `output_value`.
+  `output_value`. If omitted and `log` is `true`, the simcomp writes to
+  `<name>.csv`.
 
 ~~~~~~~~~~~~~~~{.json}
 {
@@ -250,6 +251,8 @@ Optional fields for this simcomp are:
   time the simcomp computes.
 - `output_filename`: if set to a `.csv` file, write `tstep`, `time`, and the
   requested operations to that file. These writes respect `output_control` and
+  `output_value`. If omitted and `log` is `true`, the simcomp writes to
+  `<name>.csv`.
 
 ~~~~~~~~~~~~~~~{.json}
 {
@@ -258,7 +261,7 @@ Optional fields for this simcomp are:
   "field_name": "p",
   "operations": ["integral", "average", "min", "max"],
   "point_zone": "core_region",
-  "log": true,
+  "log": true
 }
 ~~~~~~~~~~~~~~~
 

@@ -200,6 +200,7 @@ contains
     character(len=*), intent(in), optional :: point_zone_name
     character(len=*), intent(in), optional :: output_filename
     character(len=:), allocatable :: csv_header
+    character(len=:), allocatable :: output_filename_
     character(len=LOG_SIZE) :: log_buf
     class(point_zone_t), pointer :: point_zone
     integer :: i
@@ -285,12 +286,18 @@ contains
     end if
     n_pts = this%coef%dof%size()
 
-    if (present(output_filename)) then
+    if (this%log) then
+       if (present(output_filename)) then
+          output_filename_ = trim(output_filename)
+       else
+          output_filename_ = trim(this%name) // ".csv"
+       end if
+
        csv_header = "tstep,time"
        do i = 1, size(this%operations)
            csv_header = trim(csv_header) // "," // trim(this%operations(i))
        end do
-       call this%csv_output%init(trim(output_filename), header = &
+       call this%csv_output%init(trim(output_filename_), header = &
              trim(csv_header), overwrite = .true.)
        call this%csv_row%init(2 + size(this%operations))
        this%csv_output_enabled = .true.
@@ -311,10 +318,12 @@ contains
     else
        write(log_buf, '(A)') "Selection: all GLL nodes"
     end if
+
     call neko_log%message(log_buf)
     if (this%use_point_zone) then
        n_pts = this%point_zone_mask_%size()
     end if
+
     n_pts_global = n_pts
     call MPI_Allreduce(MPI_IN_PLACE, n_pts_global, 1, MPI_INTEGER, MPI_SUM, &
          NEKO_COMM, ierr)
@@ -324,6 +333,7 @@ contains
     call neko_log%end_section()
 
     if (allocated(csv_header)) deallocate(csv_header)
+    if (allocated(output_filename_)) deallocate(output_filename_)
   end subroutine volume_operation_init_common
 
   !> Construct from explicit time-based controllers.
