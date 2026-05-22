@@ -62,7 +62,7 @@ contains
 
   subroutine fluid_output_init(this, precision, fluid, scalar_fields, name, &
        path, fmt, layout, always_write_mesh)
-    class(fluid_output_t), intent(inout) :: this
+    class(fluid_output_t), target, intent(inout) :: this
     integer, intent(inout) :: precision
     class(fluid_scheme_base_t), intent(in), target :: fluid
     class(scalars_t), intent(in), optional, target :: scalar_fields
@@ -140,7 +140,6 @@ contains
     end if
 
     call this%fluid%init(i + n_scalars)
-
     call this%fluid%assign(1, fluid%p)
     call this%fluid%assign(2, fluid%u)
     call this%fluid%assign(3, fluid%v)
@@ -184,6 +183,7 @@ contains
     class(fluid_output_t), intent(inout) :: this
     real(kind=rp), intent(in) :: t
     integer :: i
+
     if (NEKO_BCKND_DEVICE .eq. 1) then
 
        associate(fields => this%fluid%items)

@@ -34,6 +34,7 @@
 module case
   use num_types, only : rp, sp, dp
   use fluid_pnpn, only : fluid_pnpn_t
+  use fluid_pnpn2, only : fluid_pnpn2_t
   use fluid_scheme_incompressible, only : fluid_scheme_incompressible_t
   use fluid_scheme_base, only: fluid_scheme_base_t, fluid_scheme_base_factory
   use fluid_output, only : fluid_output_t
@@ -378,6 +379,12 @@ contains
        end if
     end if
 
+    select type (f => this%fluid)
+    type is (fluid_pnpn2_t)
+       call f%sync_p_from_public()
+       call f%sync_p_public()
+    end select
+
     call neko_log%end_section()
 
     if (scalar) then
@@ -465,6 +472,11 @@ contains
        call f%ulag%set(f%u)
        call f%vlag%set(f%v)
        call f%wlag%set(f%w)
+    type is (fluid_pnpn2_t)
+       call f%ulag%set(f%u)
+       call f%vlag%set(f%v)
+       call f%wlag%set(f%w)
+       call f%plag%set(f%p_Yh)
     end select
 
     !

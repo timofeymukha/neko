@@ -41,29 +41,36 @@ module fluid_pnpn2
   use field_math, only : field_add2, field_cmult, field_rzero
   use field_series, only : field_series_t
   use fluid_aux, only : fluid_step_info
+  use pnpn2_mixed_ops, only : pnpn2_mixed_ops_t
   use fluid_scheme_incompressible, only : fluid_scheme_incompressible_t
   use gather_scatter, only : gs_t
   use gs_ops, only : GS_OP_ADD
+  use hsmg, only : hsmg_t
+  use identity, only : ident_t
   use interpolation, only : interpolator_t
+  use jacobi, only : jacobi_t
   use json_module, only : json_file
   use json_utils, only : json_get, json_get_or_default, json_get_or_lookup, &
        json_get_or_lookup_or_default
   use krylov, only : ksp_monitor_t
   use logger, only : neko_log, LOG_SIZE
-  use math, only : add2, col2
+  use math, only : add2, add2s2, col2, cmult2, copy, glsc2, rzero
   use mathops, only : opadd2cm
   use mesh, only : mesh_t
   use neko_config, only : NEKO_BCKND_DEVICE
-  use num_types, only : i8, rp
-  use operators, only : cdtp, opgrad, ortho, rotate_cyc
+  use num_types, only : i8, rp, xp
+  use operators, only : ortho, rotate_cyc
   use pnpn2_prs_ax, only : pnpn2_prs_ax_t, pnpn2_prs_ax_clear, &
        pnpn2_prs_ax_init
+  use phmg, only : phmg_t
+  use precon, only : pc_t, precon_destroy, precon_factory
   use projection, only : projection_t
   use projection_vel, only : projection_vel_t
   use registry, only : neko_registry
   use rhs_maker, only : rhs_maker_bdf_t, rhs_maker_bdf_fctry
   use scratch_registry, only : neko_scratch_registry
-  use space, only : GLL, space_t
+  use space, only : GL, GLL, space_t
+  use tensor, only : tnsr3d
   use time_state, only : time_state_t
   use time_step_controller, only : time_step_controller_t
   use user_intf, only : user_t
@@ -71,24 +78,114 @@ module fluid_pnpn2
   implicit none
   private
 
+  !> Pressure preconditioner wrapper using Nek-style \f$ Y_h \to X_h \to Y_h \f$ mapping.
+  type, private, extends(pc_t) :: pnpn2_prs_precon_t
+     !> Wrapped preconditioner acting on the velocity space.
+     class(pc_t), allocatable :: pc_Xh
+     !> Mixed-space operators providing Nek-style `MAP21E/MAP12` tensors.
+     type(pnpn2_mixed_ops_t), pointer :: mixed_ops => null()
+     !> Velocity coefficients reused as the mesh-1 H1 operator state.
+     type(coef_t), pointer :: c_Xh => null()
+     !> Velocity dofmap.
+     type(dofmap_t), pointer :: dm_Xh => null()
+     !> Velocity gather-scatter.
+     type(gs_t), pointer :: gs_Xh => null()
+     !> Elemental global point count on `X_h` for Nek-style mean removal.
+     integer(kind=i8) :: glb_Xh_points = 0_i8
+     !> Whether a strong pressure Dirichlet boundary exists.
+     logical :: prs_dirichlet = .false.
+     !> Empty velocity-space boundary list.
+     type(bc_list_t) :: bclst_Xh
+     !> Velocity-space image of the pressure residual.
+     type(field_t) :: r_Xh
+     !> Velocity-space preconditioned correction.
+     type(field_t) :: z_Xh
+   contains
+     !> Constructor.
+     procedure, pass(this) :: init => pnpn2_prs_precon_init
+     !> Destructor.
+     procedure, pass(this) :: free => pnpn2_prs_precon_free
+     !> Apply the wrapped pressure preconditioner.
+     procedure, pass(this) :: solve => pnpn2_prs_precon_solve
+     !> Update the wrapped pressure preconditioner.
+     procedure, pass(this) :: update => pnpn2_prs_precon_update
+    !> Set the dedicated H1 coefficients on `X_h`.
+    procedure, pass(this) :: set_h1 => pnpn2_prs_precon_set_h1
+    !> Apply Nek `MAP21E`.
+    procedure, pass(this) :: map21e => pnpn2_prs_precon_map21e
+    !> Apply Nek `MAP12`.
+    procedure, pass(this) :: map12 => pnpn2_prs_precon_map12
+  end type pnpn2_prs_precon_t
+
+  !> Dedicated Nek-style local GMRES for the PnPn-2 pressure solve on \f$ Y_h \f$.
+  type, private :: pnpn2_prs_gmres_t
+     !> Restart length.
+     integer :: lgmres = 30
+     !> Maximum number of iterations.
+     integer :: max_iter = 0
+     !> Absolute convergence tolerance.
+     real(kind=rp) :: abs_tol = 0.0_rp
+     !> Enable residual logging.
+     logical :: monitor = .false.
+     !> Left split \f$ L = \sqrt{BM2INV} \f$.
+     real(kind=rp), allocatable :: ml(:)
+     !> Right split \f$ U = \sqrt{BM2} \f$.
+     real(kind=rp), allocatable :: mu(:)
+     !> Unscaled residual.
+     real(kind=rp), allocatable :: r(:)
+     !> Split residual \f$ \hat{r} = L r \f$.
+     real(kind=rp), allocatable :: r_hat(:)
+     !> Generic work vector on \f$ Y_h \f$.
+     real(kind=rp), allocatable :: w(:)
+     !> Split operator image \f$ \hat{w} = L A z \f$.
+     real(kind=rp), allocatable :: w_hat(:)
+     !> Solver-local right-hand side.
+     real(kind=rp), allocatable :: rhs(:)
+     !> Preconditioned Krylov directions on \f$ Y_h \f$.
+     real(kind=rp), allocatable :: z(:,:)
+     !> Arnoldi basis in the split pressure space.
+     real(kind=rp), allocatable :: v(:,:)
+     !> Hessenberg matrix.
+     real(kind=xp), allocatable :: h(:,:)
+     !> Givens-rotated residual coefficients.
+     real(kind=xp), allocatable :: gamma(:)
+     !> Cosines of Givens rotations.
+     real(kind=xp), allocatable :: givens_c(:)
+     !> Sines of Givens rotations.
+     real(kind=xp), allocatable :: givens_s(:)
+     !> Back-substitution coefficients.
+     real(kind=xp), allocatable :: y(:)
+   contains
+     !> Constructor.
+     procedure, pass(this) :: init => pnpn2_prs_gmres_init
+     !> Destructor.
+     procedure, pass(this) :: free => pnpn2_prs_gmres_free
+     !> Solve the local pressure system with Nek-style split GMRES semantics.
+     procedure, pass(this) :: solve => pnpn2_prs_gmres_solve
+  end type pnpn2_prs_gmres_t
+
   !> Bare-bones CPU PnPn-2 pressure-correction scheme.
   type, public, extends(fluid_scheme_incompressible_t) :: fluid_pnpn2_t
      !> Pressure function space \f$ Y_h = P_{N-2} \f$.
      type(space_t) :: Yh
      !> Pressure dofmap on \f$ Y_h \f$.
      type(dofmap_t) :: dm_Yh
-     !> Pressure gather-scatter on \f$ Y_h \f$.
-     type(gs_t) :: gs_Yh
+     !> Element-local no-op gather-scatter used only to satisfy generic APIs.
+     type(gs_t) :: gs_prs
      !> Coefficients on \f$ Y_h \f$.
      type(coef_t) :: c_Yh
      !> Interpolator between \f$ X_h \f$ and \f$ Y_h \f$.
      type(interpolator_t) :: prs_interp
      !> Non-unique global number of lower-order pressure points.
      integer(kind=i8) :: glb_prs_points = 0_i8
+     !> Solver-authoritative internal pressure on \f$ Y_h \f$.
+     type(field_t) :: p_Yh
      !> Pressure right-hand side.
      type(field_t) :: p_res
      !> Pressure increment.
      type(field_t) :: dp
+     !> Extrapolated pressure used by the predictor and pressure update.
+     type(field_t) :: p_ext
      !> Velocity right-hand side.
      type(field_t) :: u_res, v_res, w_res
      !> Velocity increment.
@@ -103,8 +200,14 @@ module fluid_pnpn2
      type(projection_vel_t) :: proj_vel
      !> BDF history maker.
      class(rhs_maker_bdf_t), allocatable :: makebdf
+     !> Pressure extrapolation history on \f$ Y_h \f$.
+     type(field_series_t) :: plag
+     !> Mixed-space pressure operators on \f$ X_h \leftrightarrow Y_h \f$.
+     type(pnpn2_mixed_ops_t) :: mixed_ops
      !> Empty pressure-increment boundary list for the linear solver.
      type(bc_list_t) :: bclst_dp
+     !> Dedicated local GMRES used for the pressure solve on \f$ Y_h \f$.
+     type(pnpn2_prs_gmres_t) :: prs_gmres
      !> Empty x-velocity increment boundary list for the linear solver.
      type(bc_list_t) :: bclst_du
      !> Empty y-velocity increment boundary list for the linear solver.
@@ -124,9 +227,374 @@ module fluid_pnpn2
      procedure, pass(this) :: restart => fluid_pnpn2_restart
      !> Set up the supported boundary-condition configuration.
      procedure, pass(this) :: setup_bcs => fluid_pnpn2_setup_bcs
+     !> Synchronize the public \f$ X_h \f$ pressure from the authoritative \f$ Y_h \f$ state.
+     procedure, pass(this) :: sync_p_public => fluid_pnpn2_sync_p_public
+     !> Synchronize the authoritative \f$ Y_h \f$ pressure from the public \f$ X_h \f$ field.
+     procedure, pass(this) :: sync_p_from_public => fluid_pnpn2_sync_p_from_public
   end type fluid_pnpn2_t
 
 contains
+
+  !> Initialize the wrapped pressure preconditioner on \f$ X_h \f$.
+  subroutine pnpn2_prs_precon_init(this, precon_type, precon_params, mixed_ops, &
+     c_Xh, dm_Xh, gs_Xh, prs_dirichlet)
+   class(pnpn2_prs_precon_t), intent(inout), target :: this
+   character(len=*), intent(in) :: precon_type
+   type(json_file), intent(inout) :: precon_params
+   type(pnpn2_mixed_ops_t), target, intent(inout) :: mixed_ops
+   type(coef_t), target, intent(inout) :: c_Xh
+   type(dofmap_t), target, intent(inout) :: dm_Xh
+   type(gs_t), target, intent(inout) :: gs_Xh
+   logical, intent(in) :: prs_dirichlet
+
+   call this%free()
+
+   this%mixed_ops => mixed_ops
+   this%c_Xh => c_Xh
+   this%dm_Xh => dm_Xh
+   this%gs_Xh => gs_Xh
+   this%prs_dirichlet = prs_dirichlet
+   this%glb_Xh_points = int(dm_Xh%msh%glb_nelv, i8) * int(dm_Xh%Xh%lxyz, i8)
+
+   call this%bclst_Xh%init()
+   call this%r_Xh%init(dm_Xh, 'pnpn2_prs_r_Xh')
+   call this%z_Xh%init(dm_Xh, 'pnpn2_prs_z_Xh')
+
+   call precon_factory(this%pc_Xh, precon_type)
+
+   select type (pcp => this%pc_Xh)
+   type is (jacobi_t)
+      call pcp%init(c_Xh, dm_Xh, gs_Xh)
+   type is (hsmg_t)
+      call pcp%init(c_Xh, this%bclst_Xh, precon_params)
+   type is (phmg_t)
+      call pcp%init(c_Xh, this%bclst_Xh, precon_params)
+   type is (ident_t)
+      continue
+   class default
+      call neko_error('Unsupported PnPn-2 pressure preconditioner on X_h.')
+   end select
+  end subroutine pnpn2_prs_precon_init
+
+  !> Free the wrapped pressure preconditioner.
+  subroutine pnpn2_prs_precon_free(this)
+   class(pnpn2_prs_precon_t), intent(inout) :: this
+
+   call this%bclst_Xh%free()
+   call this%r_Xh%free()
+   call this%z_Xh%free()
+
+   if (allocated(this%pc_Xh)) then
+     call precon_destroy(this%pc_Xh)
+     deallocate(this%pc_Xh)
+   end if
+
+   nullify(this%mixed_ops)
+   nullify(this%c_Xh)
+   nullify(this%dm_Xh)
+   nullify(this%gs_Xh)
+   this%glb_Xh_points = 0_i8
+   this%prs_dirichlet = .false.
+  end subroutine pnpn2_prs_precon_free
+
+  !> Apply the dedicated mesh-1 H1 coefficients used by the pressure preconditioner.
+  subroutine pnpn2_prs_precon_set_h1(this)
+   class(pnpn2_prs_precon_t), intent(inout) :: this
+   integer :: i, n
+
+   n = this%dm_Xh%size()
+   do concurrent (i = 1:n)
+    this%c_Xh%h1(i,1,1,1) = 1.0_rp
+    this%c_Xh%h2(i,1,1,1) = 0.0_rp
+   end do
+   this%c_Xh%ifh2 = .false.
+  end subroutine pnpn2_prs_precon_set_h1
+
+  !> Apply Nek `MAP21E` from the local pressure mesh to the velocity mesh.
+  subroutine pnpn2_prs_precon_map21e(this, y, x)
+   class(pnpn2_prs_precon_t), intent(inout) :: this
+   real(kind=rp), intent(inout) :: y(this%mixed_ops%Xh%lx, this%mixed_ops%Xh%ly, &
+       this%mixed_ops%Xh%lz, this%dm_Xh%msh%nelv)
+   real(kind=rp), intent(in) :: x(this%mixed_ops%Yh%lx, this%mixed_ops%Yh%ly, &
+       this%mixed_ops%Yh%lz, this%dm_Xh%msh%nelv)
+
+   call tnsr3d(y, this%mixed_ops%Xh%lx, x, this%mixed_ops%Yh%lx, &
+       this%mixed_ops%i12t, this%mixed_ops%i12, this%mixed_ops%i12, &
+       this%dm_Xh%msh%nelv)
+  end subroutine pnpn2_prs_precon_map21e
+
+  !> Apply Nek `MAP12` from the velocity mesh to the local pressure mesh.
+  subroutine pnpn2_prs_precon_map12(this, y, x)
+   class(pnpn2_prs_precon_t), intent(inout) :: this
+   real(kind=rp), intent(inout) :: y(this%mixed_ops%Yh%lx, this%mixed_ops%Yh%ly, &
+       this%mixed_ops%Yh%lz, this%dm_Xh%msh%nelv)
+   real(kind=rp), intent(in) :: x(this%mixed_ops%Xh%lx, this%mixed_ops%Xh%ly, &
+       this%mixed_ops%Xh%lz, this%dm_Xh%msh%nelv)
+
+   call tnsr3d(y, this%mixed_ops%Yh%lx, x, this%mixed_ops%Xh%lx, &
+       this%mixed_ops%i12, this%mixed_ops%i12t, this%mixed_ops%i12t, &
+       this%dm_Xh%msh%nelv)
+  end subroutine pnpn2_prs_precon_map12
+
+  !> Apply `MAP21E`, a mesh-1 H1 preconditioner, and `MAP12`.
+  subroutine pnpn2_prs_precon_solve(this, z, r, n)
+   class(pnpn2_prs_precon_t), intent(inout) :: this
+   integer, intent(in) :: n
+   real(kind=rp), dimension(n), intent(inout) :: z
+   real(kind=rp), dimension(n), intent(inout) :: r
+
+   call this%map21e(this%r_Xh%x, r)
+   if (.not. this%prs_dirichlet) then
+     call ortho(this%r_Xh%x, this%glb_Xh_points, this%dm_Xh%size())
+   end if
+   call this%pc_Xh%solve(this%z_Xh%x, this%r_Xh%x, this%dm_Xh%size())
+   call this%map12(z, this%z_Xh%x)
+  end subroutine pnpn2_prs_precon_solve
+
+  !> Update the wrapped \f$ X_h \f$ preconditioner.
+  subroutine pnpn2_prs_precon_update(this)
+   class(pnpn2_prs_precon_t), intent(inout) :: this
+
+   call this%set_h1()
+   call this%pc_Xh%update()
+  end subroutine pnpn2_prs_precon_update
+
+  !> Initialize the dedicated pressure GMRES work arrays and BM2 splits.
+  subroutine pnpn2_prs_gmres_init(this, n, max_iter, abs_tol, monitor, b, binv)
+   class(pnpn2_prs_gmres_t), intent(inout) :: this
+   integer, intent(in) :: n
+   integer, intent(in) :: max_iter
+   real(kind=rp), intent(in) :: abs_tol
+   logical, intent(in) :: monitor
+   real(kind=rp), intent(in) :: b(n)
+   real(kind=rp), intent(in) :: binv(n)
+   integer :: i
+
+   call this%free()
+
+   this%max_iter = max_iter
+   this%abs_tol = abs_tol
+   this%monitor = monitor
+
+   allocate(this%ml(n))
+   allocate(this%mu(n))
+   allocate(this%r(n))
+   allocate(this%r_hat(n))
+   allocate(this%w(n))
+   allocate(this%w_hat(n))
+   allocate(this%rhs(n))
+   allocate(this%z(n, this%lgmres))
+   allocate(this%v(n, this%lgmres + 1))
+   allocate(this%h(this%lgmres + 1, this%lgmres))
+   allocate(this%gamma(this%lgmres + 1))
+   allocate(this%givens_c(this%lgmres))
+   allocate(this%givens_s(this%lgmres))
+   allocate(this%y(this%lgmres))
+
+   do concurrent (i = 1:n)
+     this%ml(i) = sqrt(binv(i))
+     this%mu(i) = sqrt(b(i))
+   end do
+  end subroutine pnpn2_prs_gmres_init
+
+  !> Free the dedicated pressure GMRES work arrays.
+  subroutine pnpn2_prs_gmres_free(this)
+   class(pnpn2_prs_gmres_t), intent(inout) :: this
+
+   if (allocated(this%ml)) deallocate(this%ml)
+   if (allocated(this%mu)) deallocate(this%mu)
+   if (allocated(this%r)) deallocate(this%r)
+   if (allocated(this%r_hat)) deallocate(this%r_hat)
+   if (allocated(this%w)) deallocate(this%w)
+   if (allocated(this%w_hat)) deallocate(this%w_hat)
+   if (allocated(this%rhs)) deallocate(this%rhs)
+   if (allocated(this%z)) deallocate(this%z)
+   if (allocated(this%v)) deallocate(this%v)
+   if (allocated(this%h)) deallocate(this%h)
+   if (allocated(this%gamma)) deallocate(this%gamma)
+   if (allocated(this%givens_c)) deallocate(this%givens_c)
+   if (allocated(this%givens_s)) deallocate(this%givens_s)
+   if (allocated(this%y)) deallocate(this%y)
+
+   this%max_iter = 0
+   this%abs_tol = 0.0_rp
+   this%monitor = .false.
+  end subroutine pnpn2_prs_gmres_free
+
+  !> Solve the pressure system in the local \f$ lx2 \f$ split space.
+  function pnpn2_prs_gmres_solve(this, Ax, M, x, f, n, coef, blst, &
+      prs_dirichlet, glb_prs_points) result(ksp_results)
+   class(pnpn2_prs_gmres_t), intent(inout) :: this
+   class(ax_t), intent(in) :: Ax
+   class(pc_t), intent(inout) :: M
+   type(field_t), intent(inout) :: x
+   integer, intent(in) :: n
+   real(kind=rp), intent(in) :: f(n)
+   type(coef_t), intent(inout) :: coef
+   type(bc_list_t), intent(inout) :: blst
+   logical, intent(in) :: prs_dirichlet
+   integer(kind=i8), intent(in) :: glb_prs_points
+   type(ksp_monitor_t) :: ksp_results
+   character(len=LOG_SIZE) :: log_buf
+   integer :: i, j, k
+   integer :: iter, restart_len, m_used
+   real(kind=rp) :: norm_fac, rnorm
+   real(kind=xp) :: alpha, lr, temp
+   logical :: converged
+
+   converged = .false.
+   iter = 0
+   rnorm = 0.0_rp
+   restart_len = min(this%lgmres, this%max_iter)
+
+   if (restart_len .le. 0) then
+     call neko_error('PnPn-2 pressure GMRES requires max_iter > 0.')
+   end if
+
+   norm_fac = 1.0_rp / sqrt(coef%volume)
+
+   call copy(this%rhs, f, n)
+   if (.not. prs_dirichlet) then
+     call ortho(this%rhs, glb_prs_points, n)
+   end if
+
+   call rzero(x%x, n)
+
+   do while ((.not. converged) .and. (iter .lt. this%max_iter))
+     this%h = 0.0_xp
+     this%gamma = 0.0_xp
+     this%givens_c = 1.0_xp
+     this%givens_s = 0.0_xp
+     this%y = 0.0_xp
+     m_used = 0
+
+     call copy(this%r, this%rhs, n)
+     if (iter .gt. 0) then
+       call Ax%compute(this%w, x%x, coef, x%msh, x%Xh)
+       call blst%apply(this%w, n)
+       call add2s2(this%r, this%w, -1.0_rp, n)
+       if (.not. prs_dirichlet) then
+         call ortho(this%r, glb_prs_points, n)
+       end if
+     end if
+
+     call copy(this%r_hat, this%r, n)
+     call col2(this%r_hat, this%ml, n)
+     this%gamma(1) = sqrt(real(glsc2(this%r_hat, this%r_hat, n), xp))
+
+     if (iter .eq. 0) then
+       ksp_results%res_start = real(this%gamma(1), rp) * norm_fac
+     end if
+
+     if (this%gamma(1) .eq. 0.0_xp) then
+       converged = .true.
+       exit
+     end if
+
+     call cmult2(this%v(1,1), this%r_hat, 1.0_rp / real(this%gamma(1), rp), n)
+
+     do j = 1, restart_len
+       m_used = j
+       iter = iter + 1
+
+       call copy(this%w, this%v(1,j), n)
+       call col2(this%w, this%mu, n)
+
+       call M%solve(this%z(1,j), this%w, n)
+       if (.not. prs_dirichlet) then
+         call ortho(this%z(1,j), glb_prs_points, n)
+       end if
+
+       call Ax%compute(this%w, this%z(1,j), coef, x%msh, x%Xh)
+       call blst%apply(this%w, n)
+       call copy(this%w_hat, this%w, n)
+       call col2(this%w_hat, this%ml, n)
+
+       do i = 1, j
+         this%h(i,j) = real(glsc2(this%w_hat, this%v(1,i), n), xp)
+         call add2s2(this%w_hat, this%v(1,i), -real(this%h(i,j), rp), n)
+       end do
+
+       alpha = sqrt(real(glsc2(this%w_hat, this%w_hat, n), xp))
+       this%h(j + 1,j) = alpha
+
+       do i = 1, j - 1
+         temp = this%h(i,j)
+         this%h(i,j) = this%givens_c(i) * temp + this%givens_s(i) * &
+              this%h(i + 1,j)
+         this%h(i + 1,j) = -this%givens_s(i) * temp + this%givens_c(i) * &
+              this%h(i + 1,j)
+       end do
+
+       if (alpha .eq. 0.0_xp) then
+         this%gamma(j + 1) = 0.0_xp
+         rnorm = 0.0_rp
+         converged = .true.
+         exit
+       end if
+
+       lr = sqrt(this%h(j,j) * this%h(j,j) + this%h(j + 1,j) * this%h(j + 1,j))
+       this%givens_c(j) = this%h(j,j) / lr
+       this%givens_s(j) = this%h(j + 1,j) / lr
+       this%h(j,j) = lr
+       this%gamma(j + 1) = -this%givens_s(j) * this%gamma(j)
+       this%gamma(j) = this%givens_c(j) * this%gamma(j)
+
+       rnorm = abs(real(this%gamma(j + 1), rp)) * norm_fac
+       if (this%monitor) then
+         write(log_buf, '(A,I6,1X,ES13.6)') 'PnPn-2 pressure GMRES', iter, rnorm
+         call neko_log%message(log_buf)
+       end if
+
+       if (rnorm .lt. this%abs_tol) then
+         converged = .true.
+         exit
+       end if
+
+       if (iter .ge. this%max_iter) exit
+
+       call cmult2(this%v(1,j + 1), this%w_hat, 1.0_rp / real(alpha, rp), n)
+     end do
+
+     if (m_used .eq. 0) cycle
+
+     do k = m_used, 1, -1
+       temp = this%gamma(k)
+       do i = m_used, k + 1, -1
+         temp = temp - this%h(k,i) * this%y(i)
+       end do
+       this%y(k) = temp / this%h(k,k)
+     end do
+
+     do i = 1, m_used
+       call add2s2(x%x, this%z(1,i), real(this%y(i), rp), n)
+     end do
+
+     if (.not. prs_dirichlet) then
+       call ortho(x%x, glb_prs_points, n)
+     end if
+   end do
+
+   if (.not. prs_dirichlet) then
+     call ortho(x%x, glb_prs_points, n)
+   end if
+
+   ksp_results%iter = iter
+   ksp_results%res_final = rnorm
+   ksp_results%converged = converged .and. (rnorm .le. this%abs_tol)
+  end function pnpn2_prs_gmres_solve
+
+  !> Convert a generic gather-scatter object into an element-local no-op handle.
+  subroutine pnpn2_localize_gs(gs)
+   type(gs_t), intent(inout) :: gs
+
+   gs%nlocal = 0
+   gs%nshared = 0
+   gs%nlocal_blks = 0
+   gs%nshared_blks = 0
+   gs%local_facet_offset = 0
+   gs%shared_facet_offset = 0
+  end subroutine pnpn2_localize_gs
 
   !> Initialize the milestone-1 PnPn-2 fluid scheme.
   subroutine fluid_pnpn2_init(this, msh, lx, params, user, chkp)
@@ -164,17 +632,18 @@ contains
 
     lx2 = lx - 2
     if (msh%gdim .eq. 2) then
-      call this%Yh%init(GLL, lx2, lx2)
+      call this%Yh%init(GL, lx2, lx2)
     else
-      call this%Yh%init(GLL, lx2, lx2, lx2)
+      call this%Yh%init(GL, lx2, lx2, lx2)
     end if
 
     call this%dm_Yh%init(msh, this%Yh)
-    call this%gs_Yh%init(this%dm_Yh)
-    call this%c_Yh%init(this%gs_Yh)
+    call this%gs_prs%init(this%dm_Yh)
+    call pnpn2_localize_gs(this%gs_prs)
+    call this%c_Yh%init(this%gs_prs)
     call this%prs_interp%init(this%Xh, this%Yh)
 
-    call neko_registry%add_field(this%dm_Yh, 'p')
+    call neko_registry%add_field(this%dm_Xh, 'p')
     this%p => neko_registry%get_field('p')
 
     call json_get_or_lookup(params, 'case.numerics.time_order', time_order)
@@ -183,12 +652,17 @@ contains
 
     call ax_helm_factory(this%Ax_vel, full_formulation = .false.)
     allocate(pnpn2_prs_ax_t::this%Ax_prs)
-    call pnpn2_prs_ax_init(this%Xh, this%Yh, this%c_Xh, this%prs_interp)
+    call this%mixed_ops%init(this%Xh, this%Yh, this%dm_Xh, this%dm_Yh, &
+         this%c_Xh, this%c_Yh)
+    call pnpn2_prs_ax_init(this%mixed_ops)
 
     call rhs_maker_bdf_fctry(this%makebdf)
 
+    call this%p_Yh%init(this%dm_Yh, 'p_Yh')
     call this%p_res%init(this%dm_Yh, 'p_res')
     call this%dp%init(this%dm_Yh, 'dp')
+    call this%p_ext%init(this%dm_Yh, 'p_ext')
+    call this%plag%init(this%p_Yh, 3)
     call this%u_res%init(this%dm_Xh, 'u_res')
     call this%v_res%init(this%dm_Xh, 'v_res')
     call this%w_res%init(this%dm_Xh, 'w_res')
@@ -220,10 +694,21 @@ contains
          trim(precon_type) // ')')
     write(log_buf, '(A,ES13.6)') 'Abs tol    :', abs_tol
     call neko_log%message(log_buf)
+    if (trim(solver_type) .ne. 'gmres') then
+      call neko_error('pnpn2 milestone-1 pressure solve currently requires gmres.')
+    end if
     call this%solver_factory(this%ksp_prs, this%dm_Yh%size(), solver_type, &
          solver_maxiter, abs_tol, monitor)
-    call this%precon_factory_(this%pc_prs, this%ksp_prs, this%c_Yh, &
-         this%dm_Yh, this%gs_Yh, this%bcs_prs, precon_type, precon_params)
+    allocate(pnpn2_prs_precon_t :: this%pc_prs)
+    select type (pc_prs => this%pc_prs)
+    type is (pnpn2_prs_precon_t)
+       call pc_prs%init(precon_type, precon_params, this%mixed_ops, &
+            this%c_Xh, this%dm_Xh, this%gs_Xh, this%prs_dirichlet)
+    end select
+    call this%ksp_prs%set_pc(this%pc_prs)
+    call this%prs_gmres%init(this%dm_Yh%size(), this%ksp_prs%max_iter, &
+         this%ksp_prs%abs_tol, this%ksp_prs%monitor, this%c_Yh%B, &
+         this%c_Yh%Binv)
     call neko_log%end_section()
 
     this%glb_prs_points = int(this%msh%glb_nelv, i8) * int(this%Yh%lxyz, i8)
@@ -242,6 +727,7 @@ contains
     class(fluid_pnpn2_t), intent(inout) :: this
 
     call pnpn2_prs_ax_clear()
+    call this%prs_gmres%free()
 
     call this%scheme_free()
 
@@ -263,8 +749,13 @@ contains
     call this%proj_prs%free()
     call this%proj_vel%free()
 
+    call this%plag%free()
+    call this%mixed_ops%free()
+
+    call this%p_Yh%free()
     call this%p_res%free()
     call this%dp%free()
+    call this%p_ext%free()
     call this%u_res%free()
     call this%v_res%free()
     call this%w_res%free()
@@ -279,7 +770,7 @@ contains
 
     call this%prs_interp%free()
     call this%c_Yh%free()
-    call this%gs_Yh%free()
+    call this%gs_prs%free()
     call this%dm_Yh%free()
     call this%Yh%free()
 
@@ -292,8 +783,8 @@ contains
     class(fluid_pnpn2_t), target, intent(inout) :: this
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
-    type(field_t), pointer :: p_Xh, gx, gy, gz, div_Xh
-    integer :: scratch_ids(5)
+    type(field_t), pointer :: gx, gy, gz
+    integer :: scratch_ids(3)
     integer :: n_x, n_y
     integer :: i
     real(kind=rp) :: rho_val, mu_val, a0, dt
@@ -320,6 +811,14 @@ contains
     call this%ulag%update()
     call this%vlag%update()
     call this%wlag%update()
+    call this%plag%update()
+
+    do concurrent (i = 1:n_y)
+      this%p_ext%x(i,1,1,1) = this%ext_bdf%advection_coeffs%x(1) * &
+           this%plag%lf(1)%x(i,1,1,1) + &
+           this%ext_bdf%advection_coeffs%x(2) * this%plag%lf(2)%x(i,1,1,1) + &
+           this%ext_bdf%advection_coeffs%x(3) * this%plag%lf(3)%x(i,1,1,1)
+    end do
 
     do concurrent (i = 1:n_x)
       this%c_Xh%h1(i,1,1,1) = mu_val
@@ -341,13 +840,9 @@ contains
          this%c_Xh%B, rho_val, dt, this%ext_bdf%diffusion_coeffs%x, &
          this%ext_bdf%ndiff, n_x, this%c_Xh%Blag, this%c_Xh%Blaglag)
 
-    call neko_scratch_registry%request_field(p_Xh, scratch_ids(1), .false.)
-    call neko_scratch_registry%request_field(gx, scratch_ids(2), .false.)
-    call neko_scratch_registry%request_field(gy, scratch_ids(3), .false.)
-    call neko_scratch_registry%request_field(gz, scratch_ids(4), .false.)
-    call neko_scratch_registry%request_field(div_Xh, scratch_ids(5), .false.)
-
-    call this%prs_interp%map(p_Xh%x, this%p%x, this%msh%nelv, this%Xh)
+    call neko_scratch_registry%request_field(gx, scratch_ids(1), .false.)
+    call neko_scratch_registry%request_field(gy, scratch_ids(2), .false.)
+    call neko_scratch_registry%request_field(gz, scratch_ids(3), .false.)
 
     call this%Ax_vel%compute(this%u_res%x, this%u%x, this%c_Xh, this%msh, &
          this%Xh)
@@ -355,14 +850,14 @@ contains
          this%Xh)
     call this%Ax_vel%compute(this%w_res%x, this%w%x, this%c_Xh, this%msh, &
          this%Xh)
-    call opgrad(gx%x, gy%x, gz%x, p_Xh%x, this%c_Xh)
+    call this%mixed_ops%opgradt(gx%x, gy%x, gz%x, this%p_ext%x)
 
     do concurrent (i = 1:n_x)
-      this%u_res%x(i,1,1,1) = this%f_x%x(i,1,1,1) - this%u_res%x(i,1,1,1) - &
+      this%u_res%x(i,1,1,1) = this%f_x%x(i,1,1,1) - this%u_res%x(i,1,1,1) + &
            gx%x(i,1,1,1)
-      this%v_res%x(i,1,1,1) = this%f_y%x(i,1,1,1) - this%v_res%x(i,1,1,1) - &
+      this%v_res%x(i,1,1,1) = this%f_y%x(i,1,1,1) - this%v_res%x(i,1,1,1) + &
            gy%x(i,1,1,1)
-      this%w_res%x(i,1,1,1) = this%f_z%x(i,1,1,1) - this%w_res%x(i,1,1,1) - &
+      this%w_res%x(i,1,1,1) = this%f_z%x(i,1,1,1) - this%w_res%x(i,1,1,1) + &
            gz%x(i,1,1,1)
     end do
 
@@ -391,41 +886,45 @@ contains
     call opadd2cm(this%u%x, this%v%x, this%w%x, this%du%x, this%dv%x, &
          this%dw%x, 1.0_rp, n_x, this%msh%gdim)
 
-    call cdtp(div_Xh%x, this%u%x, this%c_Xh%drdx, this%c_Xh%dsdx, &
-         this%c_Xh%dtdx, this%c_Xh)
-    call cdtp(gx%x, this%v%x, this%c_Xh%drdy, this%c_Xh%dsdy, &
-         this%c_Xh%dtdy, this%c_Xh)
-    call cdtp(gy%x, this%w%x, this%c_Xh%drdz, this%c_Xh%dsdz, &
-         this%c_Xh%dtdz, this%c_Xh)
-    call add2(div_Xh%x, gx%x, n_x)
-    call add2(div_Xh%x, gy%x, n_x)
-
-    call this%prs_interp%map(this%p_res%x, div_Xh%x, this%msh%nelv, this%Yh)
-    call field_cmult(this%p_res, -(a0 / dt), n_y)
+    call this%mixed_ops%opdiv(this%p_res%x, this%u%x, this%v%x, this%w%x)
+    call field_cmult(this%p_res, -1.0_rp, n_y)
     if (.not. this%prs_dirichlet) then
-      call ortho(this%p_res%x, this%glb_prs_points, n_y)
+     call ortho(this%p_res%x, this%glb_prs_points, n_y)
     end if
-    call this%gs_Yh%op(this%p_res, GS_OP_ADD)
 
-    call this%proj_prs%pre_solving(this%p_res%x, time%tstep, this%c_Yh, n_y, &
-         dt_controller, Ax = this%Ax_prs, gs_h = this%gs_Yh, &
-         bclst = this%bclst_dp, string = 'Pressure')
+    if (this%pr_projection_dim .gt. 0) then
+      call this%proj_prs%pre_solving(this%p_res%x, time%tstep, this%c_Yh, n_y, &
+           dt_controller, Ax = this%Ax_prs, gs_h = this%gs_prs, &
+           bclst = this%bclst_dp, string = 'Pressure')
+    end if
 
     call this%pc_prs%update()
-    ksp_results(1) = this%ksp_prs%solve(this%Ax_prs, this%dp, this%p_res%x, &
-         n_y, this%c_Yh, this%bclst_dp, this%gs_Yh)
+    ksp_results(1) = this%prs_gmres%solve(this%Ax_prs, this%pc_prs, this%dp, &
+         this%p_res%x, n_y, this%c_Yh, this%bclst_dp, this%prs_dirichlet, &
+         this%glb_prs_points)
     ksp_results(1)%name = 'Pressure'
 
-    call this%proj_prs%post_solving(this%dp%x, this%Ax_prs, this%c_Yh, &
-         this%bclst_dp, this%gs_Yh, n_y, time%tstep, dt_controller)
-
-    call field_add2(this%p, this%dp, n_y)
-    if (.not. this%prs_dirichlet) then
-      call ortho(this%p%x, this%glb_prs_points, n_y)
+    if (this%pr_projection_dim .gt. 0) then
+      call this%proj_prs%post_solving(this%dp%x, this%Ax_prs, this%c_Yh, &
+           this%bclst_dp, this%gs_prs, n_y, time%tstep, dt_controller)
     end if
+    if (.not. this%prs_dirichlet) then
+      call ortho(this%dp%x, this%glb_prs_points, n_y)
+    end if
+    call field_cmult(this%dp, a0 / dt, n_y)
 
-    call this%prs_interp%map(p_Xh%x, this%dp%x, this%msh%nelv, this%Xh)
-    call opgrad(gx%x, gy%x, gz%x, p_Xh%x, this%c_Xh)
+    do concurrent (i = 1:n_y)
+      this%p_Yh%x(i,1,1,1) = this%p_ext%x(i,1,1,1) + this%dp%x(i,1,1,1)
+    end do
+    if (.not. this%prs_dirichlet) then
+      call ortho(this%p_Yh%x, this%glb_prs_points, n_y)
+    end if
+    call this%sync_p_public()
+
+    call this%mixed_ops%opgradt(gx%x, gy%x, gz%x, this%dp%x)
+    call this%gs_Xh%op(gx, GS_OP_ADD)
+    call this%gs_Xh%op(gy, GS_OP_ADD)
+    call this%gs_Xh%op(gz, GS_OP_ADD)
     call col2(gx%x, this%c_Xh%Binv, n_x)
     call col2(gy%x, this%c_Xh%Binv, n_x)
     call col2(gz%x, this%c_Xh%Binv, n_x)
@@ -447,7 +946,9 @@ contains
       call neko_error('pnpn2 restart is currently CPU-only.')
     end if
 
-    call pnpn2_prs_ax_init(this%Xh, this%Yh, this%c_Xh, this%prs_interp)
+    call this%sync_p_from_public()
+    call this%plag%set(this%p_Yh)
+    call pnpn2_prs_ax_init(this%mixed_ops)
   end subroutine fluid_pnpn2_restart
 
   !> Set up the supported boundary-condition configuration for milestone 1.
@@ -477,5 +978,19 @@ contains
 
     this%prs_dirichlet = .false.
   end subroutine fluid_pnpn2_setup_bcs
+
+  !> Refresh the public \f$ X_h \f$ pressure view from the authoritative \f$ Y_h \f$ state.
+  subroutine fluid_pnpn2_sync_p_public(this)
+    class(fluid_pnpn2_t), intent(inout) :: this
+
+    call this%prs_interp%map(this%p%x, this%p_Yh%x, this%msh%nelv, this%Xh)
+  end subroutine fluid_pnpn2_sync_p_public
+
+  !> Refresh the authoritative \f$ Y_h \f$ pressure from the public \f$ X_h \f$ field.
+  subroutine fluid_pnpn2_sync_p_from_public(this)
+    class(fluid_pnpn2_t), intent(inout) :: this
+
+    call this%prs_interp%map(this%p_Yh%x, this%p%x, this%msh%nelv, this%Yh)
+  end subroutine fluid_pnpn2_sync_p_from_public
 
 end module fluid_pnpn2
