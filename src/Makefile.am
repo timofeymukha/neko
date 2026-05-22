@@ -271,6 +271,8 @@ neko_fortran_SOURCES = \
 	fluid/regularization/bcknd/device/entropy_viscosity_device.F90\
 	fluid/fluid_scheme_compressible_euler.f90\
 	fluid/fluid_aux.f90\
+	fluid/pnpn2_prs_ax.f90\
+	fluid/fluid_pnpn2.f90\
 	fluid/fluid_pnpn.f90\
 	fluid/fluid_base_fctry.f90\
 	fluid/fluid_pnpn_bc_fctry.f90\
