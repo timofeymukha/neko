@@ -8,6 +8,7 @@
 !COPYING
 
 # General list of files to ignore
+**/Info.plist
 *.mod
 *.smod
 *.o

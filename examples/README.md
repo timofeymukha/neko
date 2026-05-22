@@ -30,6 +30,8 @@ documented and up to date.
 - euler_2d_smooth, 2D Euler equations for the advection of a smooth density
   wave.
 - euler_tgv, Euler equations solution for compressible Taylor-Green vortex.
+- guermond_shen, Manufactured Stokes solution with a user source term and
+  error output.
 - hemi, One of the original cases from Nek5000.
 - immersed_bunny, shows usage of Brinkman source term to simulate an immersed
   boundary.
