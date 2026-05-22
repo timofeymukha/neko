@@ -33,6 +33,7 @@
 !> Implements type `fluid_pnpn2_t`.
 module fluid_pnpn2
   use ax_product, only : ax_t, ax_helm_factory
+  use advection, only : advection_t, advection_factory
   use bc_list, only : bc_list_t
   use checkpoint, only : chkp_t
   use coefs, only : coef_t
@@ -67,7 +68,9 @@ module fluid_pnpn2
   use projection, only : projection_t
   use projection_vel, only : projection_vel_t
   use registry, only : neko_registry
-  use rhs_maker, only : rhs_maker_bdf_t, rhs_maker_bdf_fctry
+  use rhs_maker, only : rhs_maker_bdf_t, rhs_maker_ext_t, &
+       rhs_maker_oifs_t, rhs_maker_bdf_fctry, rhs_maker_ext_fctry, &
+       rhs_maker_oifs_fctry
   use scratch_registry, only : neko_scratch_registry
   use space, only : GL, GLL, space_t
   use tensor, only : tnsr3d
@@ -232,6 +235,17 @@ module fluid_pnpn2
      !> Synchronize the authoritative \f$ Y_h \f$ pressure from the public \f$ X_h \f$ field.
      procedure, pass(this) :: sync_p_from_public => fluid_pnpn2_sync_p_from_public
   end type fluid_pnpn2_t
+
+  ! Keep the temporary milestone-1 advection state outside fluid_pnpn2_t.
+  ! The current branch's pressure-preconditioner setup is sensitive to changes
+  ! in the extended solver type layout.
+  class(advection_t), allocatable, save :: pnpn2_adv
+  logical, save :: pnpn2_oifs = .false.
+  type(field_t), save :: pnpn2_abx1, pnpn2_aby1, pnpn2_abz1
+  type(field_t), save :: pnpn2_abx2, pnpn2_aby2, pnpn2_abz2
+  type(field_t), save :: pnpn2_advx, pnpn2_advy, pnpn2_advz
+  class(rhs_maker_ext_t), allocatable, save :: pnpn2_makeabf
+  class(rhs_maker_oifs_t), allocatable, save :: pnpn2_makeoifs
 
 contains
 
@@ -610,9 +624,9 @@ contains
     integer :: time_order
     integer :: solver_maxiter
     real(kind=rp) :: abs_tol
-    logical :: monitor
+    logical :: monitor, advection
     character(len=:), allocatable :: solver_type, precon_type
-    type(json_file) :: precon_params
+    type(json_file) :: numerics_params, precon_params
 
     call this%free()
 
@@ -711,13 +725,33 @@ contains
          this%c_Yh%Binv)
     call neko_log%end_section()
 
+    call json_get_or_default(params, 'case.numerics.oifs', pnpn2_oifs, .false.)
+    call json_get_or_default(params, 'case.fluid.advection', advection, .true.)
+    call json_get(params, 'case.numerics', numerics_params)
+    call rhs_maker_ext_fctry(pnpn2_makeabf)
+    call pnpn2_abx1%init(this%dm_Xh, 'abx1')
+    call pnpn2_aby1%init(this%dm_Xh, 'aby1')
+    call pnpn2_abz1%init(this%dm_Xh, 'abz1')
+    call pnpn2_abx2%init(this%dm_Xh, 'abx2')
+    call pnpn2_aby2%init(this%dm_Xh, 'aby2')
+    call pnpn2_abz2%init(this%dm_Xh, 'abz2')
+    if (pnpn2_oifs) then
+      call rhs_maker_oifs_fctry(pnpn2_makeoifs)
+      call pnpn2_advx%init(this%dm_Xh, 'advx')
+      call pnpn2_advy%init(this%dm_Xh, 'advy')
+      call pnpn2_advz%init(this%dm_Xh, 'advz')
+    end if
+    call advection_factory(pnpn2_adv, numerics_params, this%c_Xh, &
+         this%ulag, this%vlag, this%wlag, chkp%dtlag, chkp%tlag, &
+         this%ext_bdf, .not. advection)
+
     this%glb_prs_points = int(this%msh%glb_nelv, i8) * int(this%Yh%lxyz, i8)
 
     this%chkp => chkp
     call this%chkp%add_fluid(this%u, this%v, this%w, this%p)
     call this%chkp%add_lag(this%ulag, this%vlag, this%wlag)
 
-    call neko_log%message('Milestone-1 pnpn2: advection, source terms, and ' // &
+    call neko_log%message('Milestone-1 pnpn2: source terms and ' // &
          'boundary-condition terms are disabled.')
     call neko_log%end_section()
   end subroutine fluid_pnpn2_init
@@ -742,8 +776,18 @@ contains
     if (allocated(this%Ax_prs)) then
       deallocate(this%Ax_prs)
     end if
+    if (allocated(pnpn2_adv)) then
+      call pnpn2_adv%free()
+      deallocate(pnpn2_adv)
+    end if
+    if (allocated(pnpn2_makeabf)) then
+      deallocate(pnpn2_makeabf)
+    end if
     if (allocated(this%makebdf)) then
       deallocate(this%makebdf)
+    end if
+    if (allocated(pnpn2_makeoifs)) then
+      deallocate(pnpn2_makeoifs)
     end if
 
     call this%proj_prs%free()
@@ -759,6 +803,15 @@ contains
     call this%u_res%free()
     call this%v_res%free()
     call this%w_res%free()
+    call pnpn2_abx1%free()
+    call pnpn2_aby1%free()
+    call pnpn2_abz1%free()
+    call pnpn2_abx2%free()
+    call pnpn2_aby2%free()
+    call pnpn2_abz2%free()
+    call pnpn2_advx%free()
+    call pnpn2_advy%free()
+    call pnpn2_advz%free()
     call this%du%free()
     call this%dv%free()
     call this%dw%free()
@@ -808,9 +861,6 @@ contains
     rho_val = this%rho%x(1,1,1,1)
     mu_val = this%mu_tot%x(1,1,1,1)
 
-    call this%ulag%update()
-    call this%vlag%update()
-    call this%wlag%update()
     call this%plag%update()
 
     do concurrent (i = 1:n_y)
@@ -835,10 +885,33 @@ contains
     call field_rzero(this%f_y)
     call field_rzero(this%f_z)
 
-    call this%makebdf%compute_fluid(this%ulag, this%vlag, this%wlag, &
-         this%f_x%x, this%f_y%x, this%f_z%x, this%u, this%v, this%w, &
-         this%c_Xh%B, rho_val, dt, this%ext_bdf%diffusion_coeffs%x, &
-         this%ext_bdf%ndiff, n_x, this%c_Xh%Blag, this%c_Xh%Blaglag)
+    if (pnpn2_oifs) then
+      call pnpn2_adv%compute(this%u, this%v, this%w, pnpn2_advx, pnpn2_advy, &
+           pnpn2_advz, this%Xh, this%c_Xh, n_x, dt)
+
+      call pnpn2_makeabf%compute_fluid(pnpn2_abx1, pnpn2_aby1, pnpn2_abz1, &
+           pnpn2_abx2, pnpn2_aby2, pnpn2_abz2, this%f_x%x, this%f_y%x, &
+           this%f_z%x, rho_val, this%ext_bdf%advection_coeffs%x, n_x)
+
+      call pnpn2_makeoifs%compute_fluid(pnpn2_advx%x, pnpn2_advy%x, &
+           pnpn2_advz%x, this%f_x%x, this%f_y%x, this%f_z%x, rho_val, dt, n_x)
+    else
+      call pnpn2_adv%compute(this%u, this%v, this%w, this%f_x, this%f_y, &
+           this%f_z, this%Xh, this%c_Xh, n_x)
+
+      call pnpn2_makeabf%compute_fluid(pnpn2_abx1, pnpn2_aby1, pnpn2_abz1, &
+           pnpn2_abx2, pnpn2_aby2, pnpn2_abz2, this%f_x%x, this%f_y%x, &
+           this%f_z%x, rho_val, this%ext_bdf%advection_coeffs%x, n_x)
+
+      call this%makebdf%compute_fluid(this%ulag, this%vlag, this%wlag, &
+           this%f_x%x, this%f_y%x, this%f_z%x, this%u, this%v, this%w, &
+           this%c_Xh%B, rho_val, dt, this%ext_bdf%diffusion_coeffs%x, &
+           this%ext_bdf%ndiff, n_x, this%c_Xh%Blag, this%c_Xh%Blaglag)
+    end if
+
+    call this%ulag%update()
+    call this%vlag%update()
+    call this%wlag%update()
 
     call neko_scratch_registry%request_field(gx, scratch_ids(1), .false.)
     call neko_scratch_registry%request_field(gy, scratch_ids(2), .false.)
