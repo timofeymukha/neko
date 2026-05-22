@@ -93,6 +93,7 @@ module gather_scatter
      procedure, private, pass(gs) :: gs_op_r4
      procedure, pass(gs) :: gs_op_vector
      procedure, pass(gs) :: init => gs_init
+     procedure, pass(gs) :: init_noop => gs_init_noop
      procedure, pass(gs) :: free => gs_free
      generic :: op => gs_op_fld, gs_op_r4, gs_op_vector
   end type gs_t
@@ -364,6 +365,18 @@ contains
 
   end subroutine gs_init
 
+  !> Initialize an empty gather-scatter object that leaves vectors unchanged.
+  subroutine gs_init_noop(gs, dofmap)
+    class(gs_t), intent(inout) :: gs
+    type(dofmap_t), target, intent(inout) :: dofmap
+
+    call gs%free()
+
+    gs%dofmap => dofmap
+    gs%local_facet_offset = 1
+    gs%shared_facet_offset = 1
+  end subroutine gs_init_noop
+
   !> Deallocate a gather-scatter kernel
   subroutine gs_free(gs)
     class(gs_t), intent(inout) :: gs
@@ -414,6 +427,8 @@ contains
     gs%nshared = 0
     gs%nlocal_blks = 0
     gs%nshared_blks = 0
+    gs%local_facet_offset = 0
+    gs%shared_facet_offset = 0
 
     call gs%shared_dofs%free()
 
@@ -1447,6 +1462,11 @@ contains
     so = -gs%shared_facet_offset
     m = gs%nlocal
     l = gs%nshared
+
+    if (m .eq. 0 .and. l .eq. 0) then
+       if (present(event)) event = C_NULL_PTR
+       return
+    end if
 
     call profiler_start_region("gather_scatter", 5)
     ! Gather shared dofs
