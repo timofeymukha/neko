@@ -37,11 +37,9 @@ module hsmg_pnpn2
   use gather_scatter, only : gs_t, GS_OP_ADD
   use interpolation, only : interpolator_t
   use json_module, only : json_file
-  use krylov, only : KSP_MAX_ITER, ksp_monitor_t, ksp_t, krylov_solver_factory
-  use ax_product, only : ax_t, ax_helm_factory
-  use jacobi, only : jacobi_t
   use math, only : add2, col2, copy
   use num_types, only : rp
+  use pnpn2_coarse_direct, only : pnpn2_coarse_direct_t
   use precon, only : pc_t
   use schwarz, only : schwarz_t
   use space, only : GLL, space_t
@@ -77,14 +75,16 @@ module hsmg_pnpn2
      type(field_t) :: z_Xh
      type(field_t) :: r_mg, e_mg, w_mg
      type(field_t) :: r_crs, e_crs
-     type(jacobi_t) :: pc_crs
-     class(ksp_t), allocatable :: crs_solver
-     class(ax_t), allocatable :: ax_crs
+     type(pnpn2_coarse_direct_t) :: crs_solver
+     logical :: crs_solver_initialized = .false.
    contains
      procedure, pass(this) :: init => hsmg_pnpn2_init
      procedure, pass(this) :: free => hsmg_pnpn2_free
      procedure, pass(this) :: solve => hsmg_pnpn2_solve
      procedure, pass(this) :: update => hsmg_pnpn2_update
+    procedure, pass(this), private :: set_h1_coeffs => hsmg_pnpn2_set_h1_coeffs
+    procedure, pass(this), private :: weight_restriction_boundary => &
+         hsmg_pnpn2_weight_restriction_boundary
   end type hsmg_pnpn2_t
 
 contains
@@ -133,6 +133,7 @@ contains
     call this%dm_mg%init(c_Xh%msh, this%Xh_mg)
     call this%gs_mg%init(this%dm_mg)
     call this%c_mg%init(this%gs_mg)
+    call this%set_h1_coeffs(this%c_mg)
     call this%r_mg%init(this%dm_mg, 'hsmg_pnpn2_r_mg')
     call this%e_mg%init(this%dm_mg, 'hsmg_pnpn2_e_mg')
     call this%w_mg%init(this%dm_mg, 'hsmg_pnpn2_w_mg')
@@ -141,6 +142,7 @@ contains
     call this%dm_crs%init(c_Xh%msh, this%Xh_crs)
     call this%gs_crs%init(this%dm_crs)
     call this%c_crs%init(this%gs_crs)
+    call this%set_h1_coeffs(this%c_crs)
     call this%r_crs%init(this%dm_crs, 'hsmg_pnpn2_r_crs')
     call this%e_crs%init(this%dm_crs, 'hsmg_pnpn2_e_crs')
 
@@ -164,10 +166,8 @@ contains
          this%bclst_mg, c_Xh%msh)
     call this%interp_top_mg%init(Yh, this%Xh_mg)
     call this%interp_mg_crs%init(this%Xh_mg, this%Xh_crs)
-    call ax_helm_factory(this%ax_crs, full_formulation = .false.)
-    call this%pc_crs%init(this%c_crs, this%dm_crs, this%gs_crs)
-    call krylov_solver_factory(this%crs_solver, this%dm_crs%size(), 'cg', &
-         KSP_MAX_ITER, M = this%pc_crs, monitor = .false.)
+    call this%crs_solver%init(this%c_Xh, this%dm_Xh, this%dm_crs, this%bclst_crs)
+    this%crs_solver_initialized = .true.
   end subroutine hsmg_pnpn2_init
 
   !> Release pressure-space HSMG storage.
@@ -178,13 +178,9 @@ contains
     call this%schwarz_mg%free()
     call this%interp_top_mg%free()
     call this%interp_mg_crs%free()
-    call this%pc_crs%free()
-    if (allocated(this%crs_solver)) then
+    if (this%crs_solver_initialized) then
       call this%crs_solver%free()
-      deallocate(this%crs_solver)
-    end if
-    if (allocated(this%ax_crs)) then
-      deallocate(this%ax_crs)
+      this%crs_solver_initialized = .false.
     end if
     call this%r_Yh%free()
     call this%w_Yh%free()
@@ -229,7 +225,6 @@ contains
     integer :: ix, iy, iz, nelv
     integer :: nx, ny, nz, nxyz_y
     integer :: id_x, id_y
-    type(ksp_monitor_t) :: crs_info
 
     if (.not. associated(this%c_Xh)) then
       call neko_error('hsmg_pnpn2 used before initialization.')
@@ -292,13 +287,13 @@ contains
     call this%gs_mg%op(this%r_mg%x, this%dm_mg%size(), GS_OP_ADD)
 
     call this%schwarz_mg%compute(this%e_mg%x, this%r_mg%x)
-    call col2(this%r_mg%x, this%c_mg%mult, this%dm_mg%size())
+    call this%weight_restriction_boundary(this%r_mg%x, this%c_mg)
 
     call this%interp_mg_crs%map(this%r_crs%x, this%r_mg%x, nelv, this%Xh_crs)
+    call this%gs_crs%op(this%r_crs%x, this%dm_crs%size(), GS_OP_ADD)
     call this%bclst_crs%apply_scalar(this%r_crs%x, this%dm_crs%size())
 
-    crs_info = this%crs_solver%solve(this%ax_crs, this%e_crs, this%r_crs%x, &
-         this%dm_crs%size(), this%c_crs, this%bclst_crs, this%gs_crs, 10)
+    call this%crs_solver%solve(this%e_crs%x, this%r_crs%x, this%c_crs)
     call this%bclst_crs%apply_scalar(this%e_crs%x, this%dm_crs%size())
 
     call this%interp_mg_crs%map(this%w_mg%x, this%e_crs%x, nelv, this%Xh_mg)
@@ -311,9 +306,67 @@ contains
   !> Refresh HSMG coefficients.
   subroutine hsmg_pnpn2_update(this)
     class(hsmg_pnpn2_t), intent(inout) :: this
-
-    ! Coefficients for the top Schwarz/FDM solve are initialized from Xh.
+ 
+    call this%set_h1_coeffs(this%c_mg)
+    call this%set_h1_coeffs(this%c_crs)
   end subroutine hsmg_pnpn2_update
+
+  subroutine hsmg_pnpn2_set_h1_coeffs(this, coef)
+    class(hsmg_pnpn2_t), intent(inout) :: this
+    type(coef_t), intent(inout) :: coef
+    integer :: n
+
+    n = coef%dof%size()
+    coef%h1(1:n,1,1,1) = 1.0_rp
+    coef%h2(1:n,1,1,1) = 0.0_rp
+    coef%ifh2 = .false.
+  end subroutine hsmg_pnpn2_set_h1_coeffs
+
+  subroutine hsmg_pnpn2_weight_restriction_boundary(this, u, coef)
+    class(hsmg_pnpn2_t), intent(inout) :: this
+    type(coef_t), intent(in) :: coef
+    real(kind=rp), intent(inout) :: u(coef%Xh%lx, coef%Xh%ly, coef%Xh%lz, coef%msh%nelv)
+    integer :: e, i, j, k
+    integer :: nx, ny, nz
+
+    nx = coef%Xh%lx
+    ny = coef%Xh%ly
+    nz = coef%Xh%lz
+
+    if (coef%msh%gdim .eq. 2) then
+      do e = 1, coef%msh%nelv
+        do j = 1, ny
+          u(1,j,1,e) = u(1,j,1,e) * coef%mult(1,j,1,e)
+          u(nx,j,1,e) = u(nx,j,1,e) * coef%mult(nx,j,1,e)
+        end do
+        do i = 2, nx - 1
+          u(i,1,1,e) = u(i,1,1,e) * coef%mult(i,1,1,e)
+          u(i,ny,1,e) = u(i,ny,1,e) * coef%mult(i,ny,1,e)
+        end do
+      end do
+    else
+      do e = 1, coef%msh%nelv
+        do k = 1, nz
+          do j = 1, ny
+            u(1,j,k,e) = u(1,j,k,e) * coef%mult(1,j,k,e)
+            u(nx,j,k,e) = u(nx,j,k,e) * coef%mult(nx,j,k,e)
+          end do
+        end do
+        do k = 1, nz
+          do i = 2, nx - 1
+            u(i,1,k,e) = u(i,1,k,e) * coef%mult(i,1,k,e)
+            u(i,ny,k,e) = u(i,ny,k,e) * coef%mult(i,ny,k,e)
+          end do
+        end do
+        do j = 2, ny - 1
+          do i = 2, nx - 1
+            u(i,j,1,e) = u(i,j,1,e) * coef%mult(i,j,1,e)
+            u(i,j,nz,e) = u(i,j,nz,e) * coef%mult(i,j,nz,e)
+          end do
+        end do
+      end do
+    end if
+  end subroutine hsmg_pnpn2_weight_restriction_boundary
 
   !> Return Nek's middle HSMG point count for the current velocity GLL count.
   integer function hsmg_pnpn2_mid_lx(lx1) result(lx_mg)

@@ -34,9 +34,9 @@ module pnpn2_coarse_direct
   use comm, only : NEKO_COMM
   use dofmap, only : dofmap_t
   use field, only : field_t
-  use gather_scatter, only : gs_t, GS_OP_ADD
   use mpi_f08, only : MPI_Allreduce, MPI_INTEGER, MPI_MAX, MPI_SUM
   use num_types, only : rp
+  use space, only : space_t
   use utils, only : neko_error
   implicit none
   private
@@ -45,12 +45,16 @@ module pnpn2_coarse_direct
      integer :: n_local = 0
      integer :: n_global = 0
      integer :: max_gid = 0
+     integer :: lx_fine = 0
+     integer :: lz_fine = 0
+     integer :: nloc_crs = 0
      integer, allocatable :: gid_to_idx(:)
      integer, allocatable :: local_to_idx(:)
      integer, allocatable :: ipiv(:)
      real(kind=rp), allocatable :: lu(:,:)
      real(kind=rp), allocatable :: rhs(:)
      real(kind=rp), allocatable :: sol(:)
+     real(kind=rp), allocatable :: basis(:,:,:,:)
      logical :: initialized = .false.
      type(field_t) :: u
      type(field_t) :: w
@@ -63,23 +67,29 @@ module pnpn2_coarse_direct
 
 contains
 
-  subroutine pnpn2_coarse_direct_init(this, coef, dm, gs, bclst)
+  subroutine pnpn2_coarse_direct_init(this, coef_fine, dm_fine, dm_crs, bclst)
     class(pnpn2_coarse_direct_t), intent(inout) :: this
-    type(coef_t), intent(inout), target :: coef
-    type(dofmap_t), intent(inout), target :: dm
-    type(gs_t), intent(inout) :: gs
+    type(coef_t), intent(inout), target :: coef_fine
+    type(dofmap_t), intent(inout), target :: dm_fine
+    type(dofmap_t), intent(inout), target :: dm_crs
     type(bc_list_t), intent(inout) :: bclst
-    integer :: ierr, i, j, gid, idx
+    integer :: ierr, i, e, gid, idx, iloc, jloc
     integer :: local_max_gid
     integer, allocatable :: present_local(:), present_global(:)
-    real(kind=rp), allocatable :: amat(:,:), amat_global(:,:)
+    real(kind=rp), allocatable :: amat(:,:), amat_global(:,:), local_amat(:,:,:)
+    real(kind=rp), allocatable :: h1_save(:), h2_save(:)
+    logical :: ifh2_save
+    integer :: ncoef
 
     if (this%initialized) call this%free()
 
-    this%n_local = dm%size()
+    this%n_local = dm_crs%size()
+    this%lx_fine = coef_fine%Xh%lx
+    this%lz_fine = coef_fine%Xh%lz
+    this%nloc_crs = dm_crs%Xh%lx * dm_crs%Xh%ly * dm_crs%Xh%lz
     local_max_gid = 0
     do i = 1, this%n_local
-      local_max_gid = max(local_max_gid, int(dm%dof(i,1,1,1)))
+      local_max_gid = max(local_max_gid, int(dm_crs%dof(i,1,1,1)))
     end do
     call MPI_Allreduce(local_max_gid, this%max_gid, 1, MPI_INTEGER, MPI_MAX, &
          NEKO_COMM, ierr)
@@ -95,7 +105,7 @@ contains
     present_local = 0
     this%gid_to_idx = 0
     do i = 1, this%n_local
-      gid = int(dm%dof(i,1,1,1))
+      gid = int(dm_crs%dof(i,1,1,1))
       if (gid .gt. 0) present_local(gid) = 1
     end do
     call MPI_Allreduce(present_local, present_global, this%max_gid, MPI_INTEGER, &
@@ -110,40 +120,61 @@ contains
     end do
 
     do i = 1, this%n_local
-      gid = int(dm%dof(i,1,1,1))
+      gid = int(dm_crs%dof(i,1,1,1))
       this%local_to_idx(i) = this%gid_to_idx(gid)
     end do
 
     allocate(amat(this%n_global, this%n_global))
     allocate(amat_global(this%n_global, this%n_global))
+    allocate(local_amat(this%nloc_crs, this%nloc_crs, coef_fine%msh%nelv))
     allocate(this%lu(this%n_global, this%n_global))
     allocate(this%rhs(this%n_global))
     allocate(this%sol(this%n_global))
     allocate(this%ipiv(this%n_global))
-
-    call this%u%init(dm, 'pnpn2_coarse_direct_u')
-    call this%w%init(dm, 'pnpn2_coarse_direct_w')
+    allocate(this%basis(this%lx_fine, this%lx_fine, this%lz_fine, this%nloc_crs))
+    call this%u%init(dm_fine, 'pnpn2_coarse_direct_u')
+    call this%w%init(dm_fine, 'pnpn2_coarse_direct_w')
     call ax_helm_factory(this%ax, full_formulation = .false.)
+    call generate_crs_basis(this%basis, coef_fine%Xh)
+    ncoef = coef_fine%dof%size()
+    allocate(h1_save(ncoef), h2_save(ncoef))
+    h1_save = coef_fine%h1(1:ncoef,1,1,1)
+    h2_save = coef_fine%h2(1:ncoef,1,1,1)
+    ifh2_save = coef_fine%ifh2
+    coef_fine%h1(1:ncoef,1,1,1) = 1.0_rp
+    coef_fine%h2(1:ncoef,1,1,1) = 0.0_rp
+    coef_fine%ifh2 = .false.
 
     amat = 0.0_rp
-    do j = 1, this%n_global
+    local_amat = 0.0_rp
+    do jloc = 1, this%nloc_crs
       this%u%x = 0.0_rp
       this%w%x = 0.0_rp
-      do i = 1, this%n_local
-        if (this%local_to_idx(i) .eq. j) then
-          this%u%x(i,1,1,1) = 1.0_rp
-        end if
+      do e = 1, coef_fine%msh%nelv
+        this%u%x(:,:,:,e) = this%basis(:,:,:,jloc)
+      end do
+      call this%ax%compute(this%w%x, this%u%x, coef_fine, this%u%msh, this%u%Xh)
+
+      do e = 1, coef_fine%msh%nelv
+        do iloc = 1, this%nloc_crs
+          local_amat(iloc,jloc,e) = sum(this%basis(:,:,:,iloc) * this%w%x(:,:,:,e))
+        end do
       end do
 
-      call this%ax%compute(this%w%x, this%u%x, coef, this%u%msh, this%u%Xh)
-      call gs%op(this%w%x, this%n_local, GS_OP_ADD)
-      call bclst%apply_scalar(this%w%x, this%n_local)
 
-      do i = 1, this%n_local
-        idx = this%local_to_idx(i)
-        amat(idx,j) = amat(idx,j) + this%w%x(i,1,1,1) * coef%mult(i,1,1,1)
+    end do
+    do e = 1, coef_fine%msh%nelv
+      do jloc = 1, this%nloc_crs
+        do iloc = 1, this%nloc_crs
+          gid = this%local_to_idx(local_crs_id(dm_crs%Xh, iloc, e))
+          idx = this%local_to_idx(local_crs_id(dm_crs%Xh, jloc, e))
+          amat(gid, idx) = amat(gid, idx) + local_amat(iloc, jloc, e)
+        end do
       end do
     end do
+    coef_fine%h1(1:ncoef,1,1,1) = h1_save
+    coef_fine%h2(1:ncoef,1,1,1) = h2_save
+    coef_fine%ifh2 = ifh2_save
 
     call MPI_Allreduce(amat, amat_global, this%n_global * this%n_global, &
          MPI_REAL_RP(), MPI_SUM, NEKO_COMM, ierr)
@@ -161,6 +192,9 @@ contains
 
     deallocate(amat)
     deallocate(amat_global)
+    deallocate(local_amat)
+    deallocate(h1_save)
+    deallocate(h2_save)
     deallocate(present_local)
     deallocate(present_global)
   end subroutine pnpn2_coarse_direct_init
@@ -176,21 +210,25 @@ contains
     if (allocated(this%lu)) deallocate(this%lu)
     if (allocated(this%rhs)) deallocate(this%rhs)
     if (allocated(this%sol)) deallocate(this%sol)
+    if (allocated(this%basis)) deallocate(this%basis)
     call this%u%free()
     call this%w%free()
     if (allocated(this%ax)) deallocate(this%ax)
     this%n_local = 0
     this%n_global = 0
     this%max_gid = 0
+    this%lx_fine = 0
+    this%lz_fine = 0
+    this%nloc_crs = 0
     this%initialized = .false.
   end subroutine pnpn2_coarse_direct_free
 
   subroutine pnpn2_coarse_direct_solve(this, e, r, coef)
-    class(pnpn2_coarse_direct_t), intent(inout) :: this
-    real(kind=rp), intent(inout) :: e(this%n_local)
-    real(kind=rp), intent(in) :: r(this%n_local)
-    type(coef_t), intent(in) :: coef
-    integer :: ierr, i, idx
+   class(pnpn2_coarse_direct_t), intent(inout) :: this
+   real(kind=rp), intent(inout) :: e(this%n_local)
+   real(kind=rp), intent(in) :: r(this%n_local)
+   type(coef_t), intent(in) :: coef
+   integer :: ierr, i, idx
 
     if (.not. allocated(this%lu)) then
       call neko_error('PnPn-2 direct coarse solver used before initialization.')
@@ -199,7 +237,7 @@ contains
     this%rhs = 0.0_rp
     do i = 1, this%n_local
       idx = this%local_to_idx(i)
-      this%rhs(idx) = this%rhs(idx) + r(i) * coef%mult(i,1,1,1)
+      this%rhs(idx) = this%rhs(idx) + r(i)
     end do
 
     call MPI_Allreduce(this%rhs, this%sol, this%n_global, MPI_REAL_RP(), &
@@ -282,5 +320,79 @@ contains
 
     dtype = MPI_REAL_PRECISION
   end function MPI_REAL_RP
+
+  integer function local_crs_id(Xh_crs, iloc, e) result(id)
+    type(space_t), intent(in) :: Xh_crs
+    integer, intent(in) :: iloc, e
+    integer :: i, j, k
+
+    i = local_crs_i(Xh_crs, iloc)
+    j = local_crs_j(Xh_crs, iloc)
+    k = local_crs_k(Xh_crs, iloc)
+    id = i + (j - 1) * Xh_crs%lx + (k - 1) * Xh_crs%lx * Xh_crs%ly + &
+         (e - 1) * Xh_crs%lx * Xh_crs%ly * Xh_crs%lz
+  end function local_crs_id
+
+  integer function local_crs_i(Xh_crs, iloc) result(i)
+    type(space_t), intent(in) :: Xh_crs
+    integer, intent(in) :: iloc
+    i = mod(iloc - 1, Xh_crs%lx) + 1
+  end function local_crs_i
+
+  integer function local_crs_j(Xh_crs, iloc) result(j)
+    type(space_t), intent(in) :: Xh_crs
+    integer, intent(in) :: iloc
+    j = mod((iloc - 1) / Xh_crs%lx, Xh_crs%ly) + 1
+  end function local_crs_j
+
+  integer function local_crs_k(Xh_crs, iloc) result(k)
+    type(space_t), intent(in) :: Xh_crs
+    integer, intent(in) :: iloc
+    k = ((iloc - 1) / (Xh_crs%lx * Xh_crs%ly)) + 1
+  end function local_crs_k
+
+  subroutine generate_crs_basis(basis, Xh_space)
+    type(space_t), intent(in) :: Xh_space
+    real(kind=rp), intent(inout) :: basis(:,:,:,:)
+    real(kind=rp), allocatable :: z0(:), z1(:), zr(:), zs(:), zt(:)
+    integer :: i, j, p, q, kk
+
+    allocate(z0(size(basis,1)), z1(size(basis,1)))
+    allocate(zr(size(basis,1)), zs(size(basis,1)), zt(size(basis,1)))
+
+    do i = 1, size(basis,1)
+      z0(i) = 0.5_rp * (1.0_rp - Xh_space%zg(i,1))
+      z1(i) = 0.5_rp * (1.0_rp + Xh_space%zg(i,1))
+    end do
+
+    basis = 0.0_rp
+    do j = 1, size(basis, 4)
+      zr = z0
+      zs = z0
+      zt = z0
+
+      if (mod(j, 2) .eq. 0) zr = z1
+      if (j .eq. 3 .or. j .eq. 4 .or. j .eq. 7 .or. j .eq. 8) zs = z1
+      if (j .gt. 4) zt = z1
+
+      if (size(basis,3) .gt. 1) then
+        do kk = 1, size(basis,3)
+          do q = 1, size(basis,2)
+            do p = 1, size(basis,1)
+              basis(p,q,kk,j) = zr(p) * zs(q) * zt(kk)
+            end do
+          end do
+        end do
+      else
+        do q = 1, size(basis,2)
+          do p = 1, size(basis,1)
+            basis(p,q,1,j) = zr(p) * zs(q)
+          end do
+        end do
+      end if
+    end do
+
+    deallocate(z0, z1, zr, zs, zt)
+  end subroutine generate_crs_basis
 
 end module pnpn2_coarse_direct
