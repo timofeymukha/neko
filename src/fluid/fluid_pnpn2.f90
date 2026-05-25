@@ -935,10 +935,6 @@ contains
 
     call this%init_base(msh, lx, params, scheme, user, .true.)
 
-    if (params%valid_path('case.fluid.source_terms')) then
-      call neko_error('pnpn2 milestone-1 does not support source terms.')
-    end if
-
     lx2 = lx - 2
     if (msh%gdim .eq. 2) then
       call this%Yh%init(GL, lx2, lx2)
@@ -1178,9 +1174,9 @@ contains
     end do
     this%c_Yh%ifh2 = .false.
 
-    call field_rzero(this%f_x)
-    call field_rzero(this%f_y)
-    call field_rzero(this%f_z)
+    call this%source_term%compute(time)
+    call this%bcs_vel%apply_vector(this%f_x%x, this%f_y%x, this%f_z%x, n_x, &
+         time, strong = .false.)
 
     if (pnpn2_oifs) then
       call pnpn2_adv%compute(this%u, this%v, this%w, pnpn2_advx, pnpn2_advy, &
