@@ -32,11 +32,14 @@
 !
 !> Implements type `fluid_pnpn2_t`.
 module fluid_pnpn2
+  use, intrinsic :: iso_fortran_env, only : error_unit
   use ax_product, only : ax_t, ax_helm_factory
   use advection, only : advection_t, advection_factory
+  use bc, only : bc_t
   use bc_list, only : bc_list_t
   use checkpoint, only : chkp_t
   use coefs, only : coef_t
+  use comm, only : NEKO_COMM
   use dofmap, only : dofmap_t
   use field, only : field_t
   use field_math, only : field_add2, field_cmult, field_rzero
@@ -48,17 +51,22 @@ module fluid_pnpn2
   use gs_ops, only : GS_OP_ADD
   use hsmg, only : hsmg_t
   use identity, only : ident_t
+  use inflow, only : inflow_t
   use interpolation, only : interpolator_t
   use jacobi, only : jacobi_t
-  use json_module, only : json_file
+  use json_module, only : json_core, json_file, json_value
   use json_utils, only : json_get, json_get_or_default, json_get_or_lookup, &
-       json_get_or_lookup_or_default
+       json_get_or_lookup_or_default, json_extract_item
   use krylov, only : ksp_monitor_t
   use logger, only : neko_log, LOG_SIZE
-  use math, only : add2, add2s2, col2, cmult2, copy, glsc2, rzero
+  use math, only : add2, add2s2, col2, cmult2, copy, glsc2, glsum, rzero
   use mathops, only : opadd2cm
   use mesh, only : mesh_t
+  use mpi_f08, only : MPI_Allreduce, MPI_IN_PLACE, MPI_INTEGER, MPI_LOGICAL, &
+       MPI_LOR, MPI_MAX
+  use mxm_wrapper, only : mxm
   use neko_config, only : NEKO_BCKND_DEVICE
+  use no_slip, only : no_slip_t
   use num_types, only : i8, rp, xp
   use operators, only : ortho, rotate_cyc
   use pnpn2_prs_ax, only : pnpn2_prs_ax_t, pnpn2_prs_ax_clear, &
@@ -77,9 +85,14 @@ module fluid_pnpn2
   use time_state, only : time_state_t
   use time_step_controller, only : time_step_controller_t
   use user_intf, only : user_t
-  use utils, only : neko_error
+  use utils, only : neko_error, neko_type_error
+  use zero_dirichlet, only : zero_dirichlet_t
   implicit none
   private
+
+  character(len=25), private :: FLUID_PNPN2_KNOWN_BCS(4) = &
+       [character(len=25) :: "no_slip", "outflow", "velocity_inlet", &
+       "velocity_value"]
 
   !> Pressure preconditioner wrapper using Nek-style \f$ Y_h \to X_h \to Y_h \f$ mapping.
   type, private, extends(pc_t) :: pnpn2_prs_precon_t
@@ -97,7 +110,7 @@ module fluid_pnpn2
      integer(kind=i8) :: glb_Xh_points = 0_i8
      !> Whether a strong pressure Dirichlet boundary exists.
      logical :: prs_dirichlet = .false.
-     !> Empty velocity-space boundary list.
+     !> Velocity-space image of strong pressure boundaries.
      type(bc_list_t) :: bclst_Xh
      !> Velocity-space image of the pressure residual.
      type(field_t) :: r_Xh
@@ -207,15 +220,25 @@ module fluid_pnpn2
      type(field_series_t) :: plag
      !> Mixed-space pressure operators on \f$ X_h \leftrightarrow Y_h \f$.
      type(pnpn2_mixed_ops_t) :: mixed_ops
-     !> Empty pressure-increment boundary list for the linear solver.
+     !> Pressure-space boundary list for the linear solver.
      type(bc_list_t) :: bclst_dp
+     !> Dummy strong-velocity marker for the residual.
+     type(zero_dirichlet_t) :: bc_vel_res
+     !> Velocity residual boundary list.
+     type(bc_list_t) :: bclst_vel_res
      !> Dedicated local GMRES used for the pressure solve on \f$ Y_h \f$.
      type(pnpn2_prs_gmres_t) :: prs_gmres
-     !> Empty x-velocity increment boundary list for the linear solver.
+     !> Dummy x-velocity increment Dirichlet marker.
+     type(zero_dirichlet_t) :: bc_du
+     !> X-velocity increment boundary list for the linear solver.
      type(bc_list_t) :: bclst_du
-     !> Empty y-velocity increment boundary list for the linear solver.
+     !> Dummy y-velocity increment Dirichlet marker.
+     type(zero_dirichlet_t) :: bc_dv
+     !> Y-velocity increment boundary list for the linear solver.
      type(bc_list_t) :: bclst_dv
-     !> Empty z-velocity increment boundary list for the linear solver.
+     !> Dummy z-velocity increment Dirichlet marker.
+     type(zero_dirichlet_t) :: bc_dw
+     !> Z-velocity increment boundary list for the linear solver.
      type(bc_list_t) :: bclst_dw
      !> Whether a strong pressure Dirichlet boundary exists.
      logical :: prs_dirichlet = .false.
@@ -251,7 +274,7 @@ contains
 
   !> Initialize the wrapped pressure preconditioner on \f$ X_h \f$.
   subroutine pnpn2_prs_precon_init(this, precon_type, precon_params, mixed_ops, &
-     c_Xh, dm_Xh, gs_Xh, prs_dirichlet)
+     c_Xh, dm_Xh, gs_Xh, bcs_prs_Xh, prs_dirichlet)
    class(pnpn2_prs_precon_t), intent(inout), target :: this
    character(len=*), intent(in) :: precon_type
    type(json_file), intent(inout) :: precon_params
@@ -259,7 +282,9 @@ contains
    type(coef_t), target, intent(inout) :: c_Xh
    type(dofmap_t), target, intent(inout) :: dm_Xh
    type(gs_t), target, intent(inout) :: gs_Xh
+   type(bc_list_t), target, intent(inout) :: bcs_prs_Xh
    logical, intent(in) :: prs_dirichlet
+   integer :: i
 
    call this%free()
 
@@ -271,6 +296,11 @@ contains
    this%glb_Xh_points = int(dm_Xh%msh%glb_nelv, i8) * int(dm_Xh%Xh%lxyz, i8)
 
    call this%bclst_Xh%init()
+   do i = 1, bcs_prs_Xh%size()
+     if (bcs_prs_Xh%strong(i)) then
+       call this%bclst_Xh%append(bcs_prs_Xh%get(i))
+     end if
+   end do
    call this%r_Xh%init(dm_Xh, 'pnpn2_prs_r_Xh')
    call this%z_Xh%init(dm_Xh, 'pnpn2_prs_z_Xh')
 
@@ -372,6 +402,116 @@ contains
    call this%set_h1()
    call this%pc_Xh%update()
   end subroutine pnpn2_prs_precon_update
+
+  !> Factory routine for supported PnPn-2 velocity boundary conditions.
+  subroutine pnpn2_velocity_bc_factory(object, json, coef)
+    class(bc_t), pointer, intent(inout) :: object
+    type(json_file), intent(inout) :: json
+    type(coef_t), target, intent(in) :: coef
+    character(len=:), allocatable :: type
+    character(len=:), allocatable :: default_name
+    integer, allocatable :: zone_indices(:)
+    character(len=64) :: buf
+    integer :: i
+
+    if (associated(object)) then
+      call object%free()
+      nullify(object)
+    end if
+
+    call json_get(json, 'type', type)
+
+    select case (trim(type))
+    case ('velocity_inlet', 'velocity_value')
+      allocate(inflow_t :: object)
+    case ('no_slip')
+      allocate(no_slip_t :: object)
+    case ('outflow')
+      if (allocated(type)) then
+        deallocate(type)
+      end if
+      return
+    case default
+      call neko_type_error('fluid_pnpn2 boundary conditions', type, &
+           FLUID_PNPN2_KNOWN_BCS)
+    end select
+
+    call json_get_or_lookup(json, 'zone_indices', zone_indices)
+    call object%init(coef, json)
+    do i = 1, size(zone_indices)
+      call object%mark_zone(coef%msh%labeled_zones(zone_indices(i)))
+    end do
+
+    write(buf, '("velocity_bc_", I0)') zone_indices(1)
+    default_name = trim(buf)
+    call json_get_or_default(json, 'name', object%name, default_name)
+    object%zone_indices = zone_indices
+    call object%finalize()
+
+    if (allocated(default_name)) then
+      deallocate(default_name)
+    end if
+    if (allocated(type)) then
+      deallocate(type)
+    end if
+    if (allocated(zone_indices)) then
+      deallocate(zone_indices)
+    end if
+  end subroutine pnpn2_velocity_bc_factory
+
+  !> Factory routine for supported PnPn-2 pressure boundary conditions on `X_h`.
+  subroutine pnpn2_pressure_bc_factory(object, json, coef)
+    class(bc_t), pointer, intent(inout) :: object
+    type(json_file), intent(inout) :: json
+    type(coef_t), target, intent(in) :: coef
+    character(len=:), allocatable :: type
+    character(len=:), allocatable :: default_name
+    integer, allocatable :: zone_indices(:)
+    character(len=64) :: buf
+    integer :: i
+
+    if (associated(object)) then
+      call object%free()
+      nullify(object)
+    end if
+
+    call json_get(json, 'type', type)
+
+    select case (trim(type))
+    case ('outflow')
+      allocate(zero_dirichlet_t :: object)
+    case ('no_slip', 'velocity_inlet', 'velocity_value')
+      if (allocated(type)) then
+        deallocate(type)
+      end if
+      return
+    case default
+      call neko_type_error('fluid_pnpn2 boundary conditions', type, &
+           FLUID_PNPN2_KNOWN_BCS)
+    end select
+
+    call json_get_or_lookup(json, 'zone_indices', zone_indices)
+    call object%init(coef, json)
+    do i = 1, size(zone_indices)
+      call object%mark_zone(coef%msh%labeled_zones(zone_indices(i)))
+    end do
+
+    write(buf, '("pressure_bc_", I0)') zone_indices(1)
+    default_name = trim(buf)
+    call json_get_or_default(json, 'name', object%name, default_name)
+    object%zone_indices = zone_indices
+    call object%finalize()
+
+    if (allocated(default_name)) then
+      deallocate(default_name)
+    end if
+    if (allocated(type)) then
+      deallocate(type)
+    end if
+    if (allocated(zone_indices)) then
+      deallocate(zone_indices)
+    end if
+  end subroutine pnpn2_pressure_bc_factory
 
   !> Initialize the dedicated pressure GMRES work arrays and BM2 splits.
   subroutine pnpn2_prs_gmres_init(this, n, max_iter, abs_tol, monitor, b, binv)
@@ -598,17 +738,172 @@ contains
    ksp_results%converged = converged .and. (rnorm .le. this%abs_tol)
   end function pnpn2_prs_gmres_solve
 
-  !> Convert a generic gather-scatter object into an element-local no-op handle.
-  subroutine pnpn2_localize_gs(gs)
-   type(gs_t), intent(inout) :: gs
+  !> Initialize lower-order GL pressure coefficients without any gather-scatter.
+  subroutine pnpn2_pressure_coef_init(c, msh, Yh, dm)
+    type(coef_t), intent(inout), target :: c
+    type(mesh_t), target, intent(inout) :: msh
+    type(space_t), target, intent(inout) :: Yh
+    type(dofmap_t), target, intent(inout) :: dm
+    integer :: e, i, lxy, lyz, lxyz, ntot
 
-   gs%nlocal = 0
-   gs%nshared = 0
-   gs%nlocal_blks = 0
-   gs%nshared_blks = 0
-   gs%local_facet_offset = 0
-   gs%shared_facet_offset = 0
-  end subroutine pnpn2_localize_gs
+    call c%free()
+
+    c%msh => msh
+    c%Xh => Yh
+    c%dof => dm
+
+    allocate(c%G11(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%G22(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%G33(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%G12(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%G13(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%G23(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dxdr(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dydr(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dzdr(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dxds(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dyds(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dzds(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dxdt(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dydt(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dzdt(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%drdx(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%drdy(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%drdz(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dsdx(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dsdy(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dsdz(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dtdx(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dtdy(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%dtdz(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%jac(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%jacinv(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%B(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%Binv(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%h1(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%h2(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%mult(Yh%lx, Yh%ly, Yh%lz, msh%nelv))
+    allocate(c%cyc_msk(0:0))
+
+    c%Blag => c%B
+    c%Blaglag => c%B
+
+    lxy = Yh%lx * Yh%ly
+    lyz = Yh%ly * Yh%lz
+    lxyz = Yh%lxyz
+    ntot = dm%size()
+
+    do e = 1, msh%nelv
+      call mxm(Yh%dx, Yh%lx, dm%x(1,1,1,e), Yh%lx, c%dxdr(1,1,1,e), lyz)
+      call mxm(Yh%dx, Yh%lx, dm%y(1,1,1,e), Yh%lx, c%dydr(1,1,1,e), lyz)
+      call mxm(Yh%dx, Yh%lx, dm%z(1,1,1,e), Yh%lx, c%dzdr(1,1,1,e), lyz)
+
+      do i = 1, Yh%lz
+        call mxm(dm%x(1,1,i,e), Yh%lx, Yh%dyt, Yh%ly, c%dxds(1,1,i,e), Yh%ly)
+        call mxm(dm%y(1,1,i,e), Yh%lx, Yh%dyt, Yh%ly, c%dyds(1,1,i,e), Yh%ly)
+        call mxm(dm%z(1,1,i,e), Yh%lx, Yh%dyt, Yh%ly, c%dzds(1,1,i,e), Yh%ly)
+      end do
+
+      if (msh%gdim .eq. 3) then
+        call mxm(dm%x(1,1,1,e), lxy, Yh%dzt, Yh%lz, c%dxdt(1,1,1,e), Yh%lz)
+        call mxm(dm%y(1,1,1,e), lxy, Yh%dzt, Yh%lz, c%dydt(1,1,1,e), Yh%lz)
+        call mxm(dm%z(1,1,1,e), lxy, Yh%dzt, Yh%lz, c%dzdt(1,1,1,e), Yh%lz)
+      else
+        c%dxdt(:,:,:,e) = 0.0_rp
+        c%dydt(:,:,:,e) = 0.0_rp
+        c%dzdt(:,:,:,e) = 1.0_rp
+      end if
+    end do
+
+    if (msh%gdim .eq. 2) then
+      do i = 1, ntot
+        c%jac(i,1,1,1) = c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) - &
+             c%dxds(i,1,1,1) * c%dydr(i,1,1,1)
+        c%drdx(i,1,1,1) = c%dyds(i,1,1,1)
+        c%drdy(i,1,1,1) = -c%dxds(i,1,1,1)
+        c%dsdx(i,1,1,1) = -c%dydr(i,1,1,1)
+        c%dsdy(i,1,1,1) = c%dxdr(i,1,1,1)
+        c%drdz(i,1,1,1) = 0.0_rp
+        c%dsdz(i,1,1,1) = 0.0_rp
+        c%dtdx(i,1,1,1) = 0.0_rp
+        c%dtdy(i,1,1,1) = 0.0_rp
+        c%dtdz(i,1,1,1) = 1.0_rp
+      end do
+    else
+      do i = 1, ntot
+        c%jac(i,1,1,1) = &
+             c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) * c%dzdt(i,1,1,1) + &
+             c%dxdt(i,1,1,1) * c%dydr(i,1,1,1) * c%dzds(i,1,1,1) + &
+             c%dxds(i,1,1,1) * c%dydt(i,1,1,1) * c%dzdr(i,1,1,1) - &
+             c%dxdr(i,1,1,1) * c%dydt(i,1,1,1) * c%dzds(i,1,1,1) - &
+             c%dxds(i,1,1,1) * c%dydr(i,1,1,1) * c%dzdt(i,1,1,1) - &
+             c%dxdt(i,1,1,1) * c%dyds(i,1,1,1) * c%dzdr(i,1,1,1)
+        c%drdx(i,1,1,1) = c%dyds(i,1,1,1) * c%dzdt(i,1,1,1) - &
+             c%dydt(i,1,1,1) * c%dzds(i,1,1,1)
+        c%drdy(i,1,1,1) = c%dxdt(i,1,1,1) * c%dzds(i,1,1,1) - &
+             c%dxds(i,1,1,1) * c%dzdt(i,1,1,1)
+        c%drdz(i,1,1,1) = c%dxds(i,1,1,1) * c%dydt(i,1,1,1) - &
+             c%dxdt(i,1,1,1) * c%dyds(i,1,1,1)
+        c%dsdx(i,1,1,1) = c%dydt(i,1,1,1) * c%dzdr(i,1,1,1) - &
+             c%dydr(i,1,1,1) * c%dzdt(i,1,1,1)
+        c%dsdy(i,1,1,1) = c%dxdr(i,1,1,1) * c%dzdt(i,1,1,1) - &
+             c%dxdt(i,1,1,1) * c%dzdr(i,1,1,1)
+        c%dsdz(i,1,1,1) = c%dxdt(i,1,1,1) * c%dydr(i,1,1,1) - &
+             c%dxdr(i,1,1,1) * c%dydt(i,1,1,1)
+        c%dtdx(i,1,1,1) = c%dydr(i,1,1,1) * c%dzds(i,1,1,1) - &
+             c%dyds(i,1,1,1) * c%dzdr(i,1,1,1)
+        c%dtdy(i,1,1,1) = c%dxds(i,1,1,1) * c%dzdr(i,1,1,1) - &
+             c%dxdr(i,1,1,1) * c%dzds(i,1,1,1)
+        c%dtdz(i,1,1,1) = c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) - &
+             c%dxds(i,1,1,1) * c%dydr(i,1,1,1)
+      end do
+    end if
+
+    do i = 1, ntot
+      c%jacinv(i,1,1,1) = 1.0_rp / c%jac(i,1,1,1)
+      c%drdx(i,1,1,1) = c%drdx(i,1,1,1) * c%jacinv(i,1,1,1)
+      c%drdy(i,1,1,1) = c%drdy(i,1,1,1) * c%jacinv(i,1,1,1)
+      c%drdz(i,1,1,1) = c%drdz(i,1,1,1) * c%jacinv(i,1,1,1)
+      c%dsdx(i,1,1,1) = c%dsdx(i,1,1,1) * c%jacinv(i,1,1,1)
+      c%dsdy(i,1,1,1) = c%dsdy(i,1,1,1) * c%jacinv(i,1,1,1)
+      c%dsdz(i,1,1,1) = c%dsdz(i,1,1,1) * c%jacinv(i,1,1,1)
+      c%dtdx(i,1,1,1) = c%dtdx(i,1,1,1) * c%jacinv(i,1,1,1)
+      c%dtdy(i,1,1,1) = c%dtdy(i,1,1,1) * c%jacinv(i,1,1,1)
+      c%dtdz(i,1,1,1) = c%dtdz(i,1,1,1) * c%jacinv(i,1,1,1)
+    end do
+
+    do i = 1, ntot
+      c%G11(i,1,1,1) = (c%drdx(i,1,1,1)**2 + c%drdy(i,1,1,1)**2 + &
+           c%drdz(i,1,1,1)**2) * c%jacinv(i,1,1,1)
+      c%G22(i,1,1,1) = (c%dsdx(i,1,1,1)**2 + c%dsdy(i,1,1,1)**2 + &
+           c%dsdz(i,1,1,1)**2) * c%jacinv(i,1,1,1)
+      c%G33(i,1,1,1) = (c%dtdx(i,1,1,1)**2 + c%dtdy(i,1,1,1)**2 + &
+           c%dtdz(i,1,1,1)**2) * c%jacinv(i,1,1,1)
+      c%G12(i,1,1,1) = (c%drdx(i,1,1,1) * c%dsdx(i,1,1,1) + &
+           c%drdy(i,1,1,1) * c%dsdy(i,1,1,1) + &
+           c%drdz(i,1,1,1) * c%dsdz(i,1,1,1)) * c%jacinv(i,1,1,1)
+      c%G13(i,1,1,1) = (c%drdx(i,1,1,1) * c%dtdx(i,1,1,1) + &
+           c%drdy(i,1,1,1) * c%dtdy(i,1,1,1) + &
+           c%drdz(i,1,1,1) * c%dtdz(i,1,1,1)) * c%jacinv(i,1,1,1)
+      c%G23(i,1,1,1) = (c%dsdx(i,1,1,1) * c%dtdx(i,1,1,1) + &
+           c%dsdy(i,1,1,1) * c%dtdy(i,1,1,1) + &
+           c%dsdz(i,1,1,1) * c%dtdz(i,1,1,1)) * c%jacinv(i,1,1,1)
+    end do
+
+    do e = 1, msh%nelv
+      do i = 1, lxyz
+        c%B(i,1,1,e) = c%jac(i,1,1,e) * Yh%w3(i,1,1)
+        c%Binv(i,1,1,e) = 1.0_rp / c%B(i,1,1,e)
+      end do
+    end do
+
+    c%h1 = 1.0_rp
+    c%h2 = 1.0_rp
+    c%mult = 1.0_rp
+    c%ifh2 = .false.
+    c%volume = glsum(c%B, ntot)
+    c%cyc_msk(0) = 1
+  end subroutine pnpn2_pressure_coef_init
 
   !> Initialize the milestone-1 PnPn-2 fluid scheme.
   subroutine fluid_pnpn2_init(this, msh, lx, params, user, chkp)
@@ -651,10 +946,13 @@ contains
       call this%Yh%init(GL, lx2, lx2, lx2)
     end if
 
+    if (this%pr_projection_dim .gt. 0) then
+      call neko_error('pnpn2 milestone-1 does not support pressure projection.')
+    end if
+
     call this%dm_Yh%init(msh, this%Yh)
-    call this%gs_prs%init(this%dm_Yh)
-    call pnpn2_localize_gs(this%gs_prs)
-    call this%c_Yh%init(this%gs_prs)
+    call this%gs_prs%init_noop(this%dm_Yh)
+    call pnpn2_pressure_coef_init(this%c_Yh, msh, this%Yh, this%dm_Yh)
     call this%prs_interp%init(this%Xh, this%Yh)
 
     call neko_registry%add_field(this%dm_Xh, 'p')
@@ -686,12 +984,6 @@ contains
 
     call this%setup_bcs(user, params)
 
-    call this%proj_prs%init(this%dm_Yh%size(), this%pr_projection_dim, &
-         this%pr_projection_activ_step, &
-         this%pr_projection_reorthogonalize_basis)
-    call this%proj_vel%init(this%dm_Xh%size(), this%vel_projection_dim, &
-         this%vel_projection_activ_step)
-
     call neko_log%section('Pressure solver')
     call json_get_or_lookup_or_default(params, &
          'case.fluid.pressure_solver.max_iterations', solver_maxiter, 800)
@@ -717,7 +1009,8 @@ contains
     select type (pc_prs => this%pc_prs)
     type is (pnpn2_prs_precon_t)
        call pc_prs%init(precon_type, precon_params, this%mixed_ops, &
-            this%c_Xh, this%dm_Xh, this%gs_Xh, this%prs_dirichlet)
+           this%c_Xh, this%dm_Xh, this%gs_Xh, this%bcs_prs, &
+           this%prs_dirichlet)
     end select
     call this%ksp_prs%set_pc(this%pc_prs)
     call this%prs_gmres%init(this%dm_Yh%size(), this%ksp_prs%max_iter, &
@@ -751,8 +1044,7 @@ contains
     call this%chkp%add_fluid(this%u, this%v, this%w, this%p)
     call this%chkp%add_lag(this%ulag, this%vlag, this%wlag)
 
-    call neko_log%message('Milestone-1 pnpn2: source terms and ' // &
-         'boundary-condition terms are disabled.')
+    call neko_log%message('Milestone-1 pnpn2: source terms are disabled.')
     call neko_log%end_section()
   end subroutine fluid_pnpn2_init
 
@@ -790,9 +1082,6 @@ contains
       deallocate(pnpn2_makeoifs)
     end if
 
-    call this%proj_prs%free()
-    call this%proj_vel%free()
-
     call this%plag%free()
     call this%mixed_ops%free()
 
@@ -816,7 +1105,13 @@ contains
     call this%dv%free()
     call this%dw%free()
 
+    call this%bc_vel_res%free()
+    call this%bc_du%free()
+    call this%bc_dv%free()
+    call this%bc_dw%free()
+
     call this%bclst_dp%free()
+    call this%bclst_vel_res%free()
     call this%bclst_du%free()
     call this%bclst_dv%free()
     call this%bclst_dw%free()
@@ -862,6 +1157,8 @@ contains
     mu_val = this%mu_tot%x(1,1,1,1)
 
     call this%plag%update()
+
+    call this%bc_apply_vel(time, strong = .true.)
 
     do concurrent (i = 1:n_y)
       this%p_ext%x(i,1,1,1) = this%ext_bdf%advection_coeffs%x(1) * &
@@ -940,8 +1237,8 @@ contains
     call this%gs_Xh%op(this%w_res, GS_OP_ADD)
     call rotate_cyc(this%u_res%x, this%v_res%x, this%w_res%x, 0, this%c_Xh)
 
-    call this%proj_vel%pre_solving(this%u_res%x, this%v_res%x, this%w_res%x, &
-         time%tstep, this%c_Xh, n_x, dt_controller, 'Velocity')
+    call this%bclst_vel_res%apply_vector(this%u_res%x, this%v_res%x, &
+         this%w_res%x, n_x, time)
 
     call this%pc_vel%update()
     ksp_results(2:4) = this%ksp_vel%solve_coupled(this%Ax_vel, this%du, &
@@ -952,23 +1249,14 @@ contains
     ksp_results(3)%name = 'Y-Velocity'
     ksp_results(4)%name = 'Z-Velocity'
 
-    call this%proj_vel%post_solving(this%du%x, this%dv%x, this%dw%x, &
-         this%Ax_vel, this%c_Xh, this%bclst_du, this%bclst_dv, this%bclst_dw, &
-         this%gs_Xh, n_x, time%tstep, dt_controller)
-
     call opadd2cm(this%u%x, this%v%x, this%w%x, this%du%x, this%dv%x, &
          this%dw%x, 1.0_rp, n_x, this%msh%gdim)
 
     call this%mixed_ops%opdiv(this%p_res%x, this%u%x, this%v%x, this%w%x)
     call field_cmult(this%p_res, -1.0_rp, n_y)
+    call this%bclst_dp%apply_scalar(this%p_res%x, n_y, time)
     if (.not. this%prs_dirichlet) then
      call ortho(this%p_res%x, this%glb_prs_points, n_y)
-    end if
-
-    if (this%pr_projection_dim .gt. 0) then
-      call this%proj_prs%pre_solving(this%p_res%x, time%tstep, this%c_Yh, n_y, &
-           dt_controller, Ax = this%Ax_prs, gs_h = this%gs_prs, &
-           bclst = this%bclst_dp, string = 'Pressure')
     end if
 
     call this%pc_prs%update()
@@ -977,10 +1265,6 @@ contains
          this%glb_prs_points)
     ksp_results(1)%name = 'Pressure'
 
-    if (this%pr_projection_dim .gt. 0) then
-      call this%proj_prs%post_solving(this%dp%x, this%Ax_prs, this%c_Yh, &
-           this%bclst_dp, this%gs_prs, n_y, time%tstep, dt_controller)
-    end if
     if (.not. this%prs_dirichlet) then
       call ortho(this%dp%x, this%glb_prs_points, n_y)
     end if
@@ -992,7 +1276,6 @@ contains
     if (.not. this%prs_dirichlet) then
       call ortho(this%p_Yh%x, this%glb_prs_points, n_y)
     end if
-    call this%sync_p_public()
 
     call this%mixed_ops%opgradt(gx%x, gy%x, gz%x, this%dp%x)
     call this%gs_Xh%op(gx, GS_OP_ADD)
@@ -1003,6 +1286,10 @@ contains
     call col2(gz%x, this%c_Xh%Binv, n_x)
     call opadd2cm(this%u%x, this%v%x, this%w%x, gx%x, gy%x, gz%x, dt / a0, &
          n_x, this%msh%gdim)
+
+    call this%bc_apply_vel(time, strong = .true.)
+    call this%sync_p_public()
+    call this%bc_apply_prs(time)
 
     call neko_scratch_registry%relinquish_field(scratch_ids)
 
@@ -1029,27 +1316,131 @@ contains
     class(fluid_pnpn2_t), target, intent(inout) :: this
     type(user_t), target, intent(in) :: user
     type(json_file), intent(inout) :: params
-    integer :: i
+    integer :: global_zone_size, i, ierr, j, n_bcs, zone_size
+    logical :: found
+    logical :: has_pressure_bc
+    logical, allocatable :: marked_zones(:)
+    integer, allocatable :: zone_indices(:)
+    class(bc_t), pointer :: bc_i
+    type(json_core) :: core
+    type(json_file) :: bc_subdict
+    type(json_value), pointer :: bc_object
 
-    if (params%valid_path('case.fluid.boundary_conditions')) then
-      call neko_error('pnpn2 milestone-1 does not support boundary conditions.')
-    end if
-
-    do i = 1, size(this%msh%labeled_zones)
-      if (this%msh%labeled_zones(i)%size .gt. 0) then
-        call neko_error('pnpn2 milestone-1 currently supports periodic cases ' // &
-             'only.')
-      end if
-    end do
-
-    call this%bcs_vel%init()
-    call this%bcs_prs%init()
-    call this%bclst_dp%init()
+    call this%bclst_vel_res%init()
     call this%bclst_du%init()
     call this%bclst_dv%init()
     call this%bclst_dw%init()
+    call this%bclst_dp%init()
 
-    this%prs_dirichlet = .false.
+    call this%bc_vel_res%init_from_components(this%c_Xh)
+    call this%bc_du%init_from_components(this%c_Xh)
+    call this%bc_dv%init_from_components(this%c_Xh)
+    call this%bc_dw%init_from_components(this%c_Xh)
+    has_pressure_bc = .false.
+
+    if (params%valid_path('case.fluid.boundary_conditions')) then
+      call params%info('case.fluid.boundary_conditions', n_children = n_bcs)
+      call params%get_core(core)
+      call params%get('case.fluid.boundary_conditions', bc_object, found)
+
+      call this%bcs_vel%init(n_bcs)
+      call this%bcs_prs%init(n_bcs)
+
+      allocate(marked_zones(size(this%msh%labeled_zones)))
+      marked_zones = .false.
+
+      do i = 1, n_bcs
+        call json_extract_item(core, bc_object, i, bc_subdict)
+        call json_get_or_lookup(bc_subdict, 'zone_indices', zone_indices)
+
+        do j = 1, size(zone_indices)
+          zone_size = this%msh%labeled_zones(zone_indices(j))%size
+          call MPI_Allreduce(zone_size, global_zone_size, 1, MPI_INTEGER, &
+               MPI_MAX, NEKO_COMM, ierr)
+
+          if (global_zone_size .eq. 0) then
+            write(error_unit, '(A, A, I0, A, A, I0, A)') "*** ERROR ***: ", &
+                 "Zone index ", zone_indices(j), &
+                 " is invalid as this zone has 0 size, meaning it ", &
+                 "is not in the mesh. Check fluid boundary condition ", i, "."
+            error stop
+          end if
+
+          if (marked_zones(zone_indices(j))) then
+            write(error_unit, '(A, A, I0, A, A, A, A)') "*** ERROR ***: ", &
+                 "Zone with index ", zone_indices(j), &
+                 " has already been assigned a boundary condition. ", &
+                 "Please check your boundary_conditions entry for the ", &
+                 "fluid and make sure that each zone index appears only ", &
+                 "in a single boundary condition."
+            error stop
+          else
+            marked_zones(zone_indices(j)) = .true.
+          end if
+        end do
+
+        bc_i => null()
+        call pnpn2_velocity_bc_factory(bc_i, bc_subdict, this%c_Xh)
+        if (associated(bc_i)) then
+          if (bc_i%strong) then
+            call this%bc_vel_res%mark_facets(bc_i%marked_facet)
+            call this%bc_du%mark_facets(bc_i%marked_facet)
+            call this%bc_dv%mark_facets(bc_i%marked_facet)
+            call this%bc_dw%mark_facets(bc_i%marked_facet)
+          end if
+          call this%bcs_vel%append(bc_i)
+        end if
+
+        bc_i => null()
+        call pnpn2_pressure_bc_factory(bc_i, bc_subdict, this%c_Xh)
+        if (associated(bc_i)) then
+          has_pressure_bc = .true.
+          call this%bcs_prs%append(bc_i)
+        end if
+
+        if (allocated(zone_indices)) then
+          deallocate(zone_indices)
+        end if
+      end do
+
+      do i = 1, size(this%msh%labeled_zones)
+        if ((this%msh%labeled_zones(i)%size .gt. 0) .and. &
+             (.not. marked_zones(i))) then
+          write(error_unit, '(A, A, I0)') "*** ERROR ***: ", &
+               "No fluid boundary condition assigned to zone ", i
+          error stop
+        end if
+      end do
+    else
+      do i = 1, size(this%msh%labeled_zones)
+        if (this%msh%labeled_zones(i)%size .gt. 0) then
+          call neko_error('No boundary_conditions entry in the case file!')
+        end if
+      end do
+
+      call this%bcs_vel%init()
+      call this%bcs_prs%init()
+    end if
+
+    call this%bc_vel_res%finalize()
+    call this%bc_du%finalize()
+    call this%bc_dv%finalize()
+    call this%bc_dw%finalize()
+    call this%bclst_vel_res%append(this%bc_vel_res)
+    call this%bclst_du%append(this%bc_du)
+    call this%bclst_dv%append(this%bc_dv)
+    call this%bclst_dw%append(this%bc_dw)
+
+    this%prs_dirichlet = has_pressure_bc
+    call MPI_Allreduce(MPI_IN_PLACE, this%prs_dirichlet, 1, MPI_LOGICAL, &
+         MPI_LOR, NEKO_COMM)
+
+    if (allocated(marked_zones)) then
+      deallocate(marked_zones)
+    end if
+    if (allocated(zone_indices)) then
+      deallocate(zone_indices)
+    end if
   end subroutine fluid_pnpn2_setup_bcs
 
   !> Refresh the public \f$ X_h \f$ pressure view from the authoritative \f$ Y_h \f$ state.
