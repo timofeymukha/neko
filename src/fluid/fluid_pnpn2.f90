@@ -49,6 +49,7 @@ module fluid_pnpn2
   use fluid_scheme_incompressible, only : fluid_scheme_incompressible_t
   use gather_scatter, only : gs_t
   use gs_ops, only : GS_OP_ADD
+  use hsmg_pnpn2, only : hsmg_pnpn2_t
   use hsmg, only : hsmg_t
   use identity, only : ident_t
   use inflow, only : inflow_t
@@ -1001,13 +1002,22 @@ contains
     end if
     call this%solver_factory(this%ksp_prs, this%dm_Yh%size(), solver_type, &
          solver_maxiter, abs_tol, monitor)
-    allocate(pnpn2_prs_precon_t :: this%pc_prs)
-    select type (pc_prs => this%pc_prs)
-    type is (pnpn2_prs_precon_t)
-       call pc_prs%init(precon_type, precon_params, this%mixed_ops, &
-           this%c_Xh, this%dm_Xh, this%gs_Xh, this%bcs_prs, &
-           this%prs_dirichlet)
-    end select
+    if (trim(precon_type) .eq. 'hsmg') then
+      allocate(hsmg_pnpn2_t :: this%pc_prs)
+      select type (pc_prs => this%pc_prs)
+      type is (hsmg_pnpn2_t)
+         call pc_prs%init(this%c_Xh, this%Yh, this%dm_Yh, this%dm_Xh, &
+             this%gs_Xh, this%bcs_prs, precon_params)
+      end select
+    else
+      allocate(pnpn2_prs_precon_t :: this%pc_prs)
+      select type (pc_prs => this%pc_prs)
+      type is (pnpn2_prs_precon_t)
+         call pc_prs%init(precon_type, precon_params, this%mixed_ops, &
+             this%c_Xh, this%dm_Xh, this%gs_Xh, this%bcs_prs, &
+             this%prs_dirichlet)
+      end select
+    end if
     call this%ksp_prs%set_pc(this%pc_prs)
     call this%prs_gmres%init(this%dm_Yh%size(), this%ksp_prs%max_iter, &
          this%ksp_prs%abs_tol, this%ksp_prs%monitor, this%c_Yh%B, &
@@ -1156,12 +1166,18 @@ contains
 
     call this%bc_apply_vel(time, strong = .true.)
 
-    do concurrent (i = 1:n_y)
-      this%p_ext%x(i,1,1,1) = this%ext_bdf%advection_coeffs%x(1) * &
-           this%plag%lf(1)%x(i,1,1,1) + &
-           this%ext_bdf%advection_coeffs%x(2) * this%plag%lf(2)%x(i,1,1,1) + &
-           this%ext_bdf%advection_coeffs%x(3) * this%plag%lf(3)%x(i,1,1,1)
-    end do
+    if (this%ext_bdf%ndiff .le. 2) then
+      do concurrent (i = 1:n_y)
+        this%p_ext%x(i,1,1,1) = this%plag%lf(1)%x(i,1,1,1)
+      end do
+    else
+      do concurrent (i = 1:n_y)
+        this%p_ext%x(i,1,1,1) = this%ext_bdf%advection_coeffs%x(1) * &
+             this%plag%lf(1)%x(i,1,1,1) + &
+             this%ext_bdf%advection_coeffs%x(2) * this%plag%lf(2)%x(i,1,1,1) + &
+             this%ext_bdf%advection_coeffs%x(3) * this%plag%lf(3)%x(i,1,1,1)
+      end do
+    end if
 
     do concurrent (i = 1:n_x)
       this%c_Xh%h1(i,1,1,1) = mu_val
