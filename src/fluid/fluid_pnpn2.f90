@@ -74,6 +74,7 @@ module fluid_pnpn2
        pnpn2_prs_ax_init
   use phmg, only : phmg_t
   use precon, only : pc_t, precon_destroy, precon_factory
+  use profiler, only : profiler_start_region, profiler_end_region
   use projection, only : projection_t
   use projection_vel, only : projection_vel_t
   use registry, only : neko_registry
@@ -1147,6 +1148,8 @@ contains
     a0 = this%ext_bdf%diffusion_coeffs%x(1)
     dt = time%dt
 
+    call profiler_start_region('Fluid', 1)
+
     if (a0 .eq. 0.0_rp) then
       call neko_error('pnpn2 received zero leading BDF coefficient.')
     end if
@@ -1220,6 +1223,7 @@ contains
     call neko_scratch_registry%request_field(gy, scratch_ids(2), .false.)
     call neko_scratch_registry%request_field(gz, scratch_ids(3), .false.)
 
+    call profiler_start_region('Velocity_residual', 19)
     call this%Ax_vel%compute(this%u_res%x, this%u%x, this%c_Xh, this%msh, &
          this%Xh)
     call this%Ax_vel%compute(this%v_res%x, this%v%x, this%c_Xh, this%msh, &
@@ -1245,12 +1249,15 @@ contains
 
     call this%bclst_vel_res%apply_vector(this%u_res%x, this%v_res%x, &
          this%w_res%x, n_x, time)
+    call profiler_end_region('Velocity_residual', 19)
 
     call this%pc_vel%update()
+    call profiler_start_region('Velocity_solve', 4)
     ksp_results(2:4) = this%ksp_vel%solve_coupled(this%Ax_vel, this%du, &
          this%dv, this%dw, this%u_res%x, this%v_res%x, this%w_res%x, n_x, &
          this%c_Xh, this%bclst_du, this%bclst_dv, this%bclst_dw, &
          this%gs_Xh, this%ksp_vel%max_iter)
+    call profiler_end_region('Velocity_solve', 4)
     ksp_results(2)%name = 'X-Velocity'
     ksp_results(3)%name = 'Y-Velocity'
     ksp_results(4)%name = 'Z-Velocity'
@@ -1258,17 +1265,21 @@ contains
     call opadd2cm(this%u%x, this%v%x, this%w%x, this%du%x, this%dv%x, &
          this%dw%x, 1.0_rp, n_x, this%msh%gdim)
 
+    call profiler_start_region('Pressure_residual', 18)
     call this%mixed_ops%opdiv(this%p_res%x, this%u%x, this%v%x, this%w%x)
     call field_cmult(this%p_res, -1.0_rp, n_y)
     call this%bclst_dp%apply_scalar(this%p_res%x, n_y, time)
     if (.not. this%prs_dirichlet) then
      call ortho(this%p_res%x, this%glb_prs_points, n_y)
     end if
+    call profiler_end_region('Pressure_residual', 18)
 
     call this%pc_prs%update()
+    call profiler_start_region('Pressure_solve', 3)
     ksp_results(1) = this%prs_gmres%solve(this%Ax_prs, this%pc_prs, this%dp, &
          this%p_res%x, n_y, this%c_Yh, this%bclst_dp, this%prs_dirichlet, &
          this%glb_prs_points)
+    call profiler_end_region('Pressure_solve', 3)
     ksp_results(1)%name = 'Pressure'
 
     if (.not. this%prs_dirichlet) then
@@ -1301,6 +1312,7 @@ contains
 
     call fluid_step_info(time, ksp_results, .false., this%strict_convergence, &
          this%allow_stabilization, 1)
+    call profiler_end_region('Fluid', 1)
   end subroutine fluid_pnpn2_step
 
   !> Restart the milestone-1 PnPn-2 scheme.

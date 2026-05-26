@@ -77,6 +77,7 @@ module hsmg_pnpn2
   use fdm, only : fdm_t
   use pnpn2_coarse_direct, only : pnpn2_coarse_direct_t
   use precon, only : pc_t, precon_factory, precon_destroy
+  use profiler, only : profiler_start_region, profiler_end_region
   use schwarz, only : schwarz_t
   use space, only : GLL, space_t
   use sx_jacobi, only : sx_jacobi_t
@@ -466,6 +467,7 @@ contains
       call neko_error('hsmg_pnpn2 received an unexpected pressure vector size.')
     end if
 
+    call profiler_start_region('HSMG_pnpn2_solve')
     call field_rzero(this%r_Xh)
     call field_rzero(this%z_Xh)
 
@@ -496,6 +498,7 @@ contains
     ! extend the shell to the true faces, exchange those face values, remove the
     ! shell contribution, apply the lx1-sized tensor FDM, then fold the solved
     ! face values back to the shell before weighting.
+    call profiler_start_region('HSMG_pnpn2_top_schwarz')
     call hsmg_pnpn2_pressure_face_ext(this%r_Xh%x, nx, nx, this%c_Xh%Xh%lz, nelv)
     call this%gs_Xh%op(this%r_Xh%x, this%dm_Xh%size(), GS_OP_ADD)
     call hsmg_pnpn2_pressure_face_add1si(this%r_Xh%x, -1.0_rp, nx, nx, &
@@ -507,11 +510,13 @@ contains
     call hsmg_pnpn2_pressure_shell_add_face(this%z_Xh%x, 1.0_rp, nx, nx, &
          this%c_Xh%Xh%lz, nelv)
     call this%weight_top_pressure(this%z_Xh%x)
+    call profiler_end_region('HSMG_pnpn2_top_schwarz')
     call copy(this%r_Yh%x, r, n)
 
     ! Step 3:
     ! Restrict the original local pressure residual to the middle H1 level and
     ! perform the middle-level gather-scatter.
+    call profiler_start_region('HSMG_pnpn2_coarse_grid')
     call this%interp_top_mg%map(this%r_mg%x, this%r_Yh%x, nelv, this%Xh_mg)
     call this%gs_mg%op(this%r_mg%x, this%dm_mg%size(), GS_OP_ADD)
 
@@ -531,12 +536,15 @@ contains
     call this%interp_mg_crs%map(this%r_crs%x, this%r_mg%x, nelv, this%Xh_crs)
     if (this%use_direct_coarse) then
       call this%weight_coarse_mask(this%r_crs%x, this%c_crs)
+      call profiler_start_region('HSMG_pnpn2_coarse_solve')
       call this%crs_solver%solve(this%e_crs%x, this%r_crs%x, this%c_crs)
+      call profiler_end_region('HSMG_pnpn2_coarse_solve')
       call this%weight_coarse_mask(this%e_crs%x, this%c_crs)
     else
       call this%gs_crs%op(this%r_crs%x, this%dm_crs%size(), GS_OP_ADD)
       call this%bclst_crs%apply(this%r_crs)
       call field_rzero(this%e_crs)
+      call profiler_start_region('HSMG_pnpn2_coarse_solve')
       if (allocated(this%amg_solver)) then
         call this%amg_solver%solve(this%e_crs%x, this%r_crs%x, this%dm_crs%size())
       else
@@ -544,6 +552,7 @@ contains
              this%dm_crs%size(), this%c_crs, this%bclst_crs, this%gs_crs, &
              this%crs_niter)
       end if
+      call profiler_end_region('HSMG_pnpn2_coarse_solve')
       call this%bclst_crs%apply_scalar(this%e_crs%x, this%dm_crs%size())
     end if
 
@@ -558,6 +567,7 @@ contains
     ! result is the sum of:
     ! - the top `X_h` Schwarz correction extracted back to `Y_h`, and
     ! - the lower-level correction prolongated from the middle H1 level.
+    call profiler_start_region('HSMG_pnpn2_prolongation')
     call this%interp_top_mg%map(this%w_Yh%x, this%e_mg%x, nelv, this%Yh)
     do e = 1, nelv
       do k = 1, nz
@@ -576,6 +586,9 @@ contains
       end do
     end do
     call add2(z, this%w_Yh%x, n)
+    call profiler_end_region('HSMG_pnpn2_prolongation')
+    call profiler_end_region('HSMG_pnpn2_coarse_grid')
+    call profiler_end_region('HSMG_pnpn2_solve')
   end subroutine hsmg_pnpn2_solve
 
   !> Refresh HSMG coefficients.
