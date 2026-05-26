@@ -105,6 +105,7 @@ module schwarz
      procedure, pass(this) :: init => schwarz_init
      procedure, pass(this) :: free => schwarz_free
      procedure, pass(this) :: compute => schwarz_compute
+     procedure, pass(this) :: compute_local_fdm => schwarz_compute_local_fdm
   end type schwarz_t
 
 contains
@@ -590,6 +591,86 @@ contains
       end if
     end associate
   end subroutine schwarz_compute
+
+  !> Apply only the local FDM/overlap part of the Schwarz solve.
+  !!
+  !! This variant is intended for the Pn/Pn-2 pressure preconditioner path,
+  !! where the caller embeds the pressure residual into a mesh-1 field and wants
+  !! only the local overlap/FDM exchange sequence, without the final fine-grid
+  !! gather-scatter, boundary-condition application, or generic Schwarz
+  !! weighting performed by [schwarz_compute](@ref schwarz::schwarz_compute).
+  subroutine schwarz_compute_local_fdm(this, e, r)
+    class(schwarz_t), intent(inout) :: this
+    real(kind=rp), dimension(this%dof%size()), intent(inout) :: e, r
+    real(kind=rp), parameter :: zero = 0.0_rp
+    real(kind=rp), parameter :: one = 1.0_rp
+    integer :: ns, enx, eny, enz
+    type(c_ptr) :: work1_d, work2_d
+    type(c_ptr) :: r_d, e_d
+
+    associate(msh => this%msh, Xh => this%Xh)
+      ns = this%dm_schwarz%size()
+      enx = Xh%lx + 2
+      eny = Xh%ly + 2
+      enz = Xh%lz + 2
+
+      if (NEKO_BCKND_DEVICE .eq. 1) then
+         r_d = device_get_ptr(r)
+         e_d = device_get_ptr(e)
+         work1_d = this%work1_d
+         work2_d = this%work2_d
+         call device_event_record(this%event, glb_cmd_queue)
+         call device_stream_wait_event(aux_cmd_queue, this%event, 0)
+         call device_schwarz_toext3d(work1_d, r_d, this%Xh%lx, &
+              this%msh%nelv, aux_cmd_queue)
+         call device_schwarz_extrude(work1_d, 0, zero, work1_d, 2, one, &
+              enx, eny, enz, this%msh%nelv, aux_cmd_queue)
+
+         this%gs_schwarz%bcknd%gs_stream = aux_cmd_queue
+         call this%gs_schwarz%op(this%work1, ns, GS_OP_ADD, this%event)
+         call device_event_sync(this%event)
+         call device_schwarz_extrude(work1_d, 0, one, work1_d, 2, -one, &
+              enx, eny, enz, this%msh%nelv, aux_cmd_queue)
+
+         call this%fdm%compute(this%work2, this%work1, aux_cmd_queue)
+
+         call device_schwarz_extrude(work1_d, 0, zero, work2_d, 0, one, &
+              enx, eny, enz, this%msh%nelv, aux_cmd_queue)
+         call this%gs_schwarz%op(this%work2, ns, GS_OP_ADD, this%event)
+         call device_event_sync(this%event)
+
+         call device_schwarz_extrude(work2_d, 0, one, work1_d, 0, -one, &
+              enx, eny, enz, this%msh%nelv, aux_cmd_queue)
+         call device_schwarz_extrude(work2_d, 2, one, work2_d, 0, one, &
+              enx, eny, enz, this%msh%nelv, aux_cmd_queue)
+         call device_schwarz_toreg3d(e_d, work2_d, this%Xh%lx, &
+              this%msh%nelv, aux_cmd_queue)
+
+         if (.not. this%local_gs) then
+            this%gs_schwarz%bcknd%gs_stream = glb_cmd_queue
+         end if
+      else
+         call schwarz_toext3d(this%work1, r, this%Xh%lx, this%msh%nelv)
+         call schwarz_extrude_single(this%work1, 0, zero, 2, one, &
+              enx, eny, enz, this%msh%nelv)
+         call this%gs_schwarz%op(this%work1, ns, GS_OP_ADD)
+         call schwarz_extrude_single(this%work1, 0, one, 2, -one, &
+              enx, eny, enz, this%msh%nelv)
+
+         call this%fdm%compute(this%work2, this%work1)
+
+         call schwarz_extrude(this%work1, 0, zero, this%work2, 0, one, &
+              enx, eny, enz, this%msh%nelv)
+         call this%gs_schwarz%op(this%work2, ns, GS_OP_ADD)
+         call schwarz_extrude(this%work2, 0, one, this%work1, 0, -one, &
+              enx, eny, enz, this%msh%nelv)
+         call schwarz_extrude_single(this%work2, 2, one, 0, one, &
+              enx, eny, enz, this%msh%nelv)
+
+         call schwarz_toreg3d(e, this%work2, this%Xh%lx, this%msh%nelv)
+      end if
+    end associate
+  end subroutine schwarz_compute_local_fdm
 
   !Apply schwarz weights along the boundary of each element.
   subroutine schwarz_wt3d(e, wt, n, nelv)

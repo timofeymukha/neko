@@ -42,8 +42,9 @@
 !! - the remaining V-cycle works on continuous H1-like spaces on successively
 !!   coarser GLL grids;
 !! - the coarse solve is performed by [pnpn2_coarse_direct_t]
-!!   (#pnpn2_coarse_direct::pnpn2_coarse_direct_t), which assembles and
-!!   factors a condensed coarse operator explicitly.
+!!   (#pnpn2_coarse_direct::pnpn2_coarse_direct_t), which now assembles a
+!!   dedicated sparse coarse operator on the unique coarse dofs and solves it
+!!   with a dedicated coarse iteration.
 !!
 !! A reader should think of this module as the orchestration layer.  It does
 !! not itself build element matrices or perform dense linear algebra.  Its job
@@ -54,21 +55,32 @@
 !! 4. perform the restriction/prolongation steps of the V-cycle, and
 !! 5. hand the true coarse solve to the dedicated coarse solver object.
 module hsmg_pnpn2
+  use ax_product, only : ax_t, ax_helm_factory
   use bc, only : bc_t
   use bc_list, only : bc_list_t
   use coefs, only : coef_t
+  use device_identity, only : device_ident_t
+  use device_jacobi, only : device_jacobi_t
   use dofmap, only : dofmap_t
   use field, only : field_t
   use field_math, only : field_rzero
   use gather_scatter, only : gs_t, GS_OP_ADD
+  use identity, only : ident_t
   use interpolation, only : interpolator_t
   use json_module, only : json_file
+  use json_utils, only : json_get_or_default
+  use jacobi, only : jacobi_t
+  use krylov, only : ksp_t, ksp_monitor_t, KSP_MAX_ITER, krylov_solver_factory
   use math, only : add2, col2, copy
+  use neko_config, only : NEKO_BCKND_DEVICE, NEKO_BCKND_SX
   use num_types, only : rp
+  use fdm, only : fdm_t
   use pnpn2_coarse_direct, only : pnpn2_coarse_direct_t
-  use precon, only : pc_t
+  use precon, only : pc_t, precon_factory, precon_destroy
   use schwarz, only : schwarz_t
   use space, only : GLL, space_t
+  use sx_jacobi, only : sx_jacobi_t
+  use tree_amg_multigrid, only : tamg_solver_t
   use utils, only : neko_error
   use zero_dirichlet, only : zero_dirichlet_t
   implicit none
@@ -100,8 +112,8 @@ module hsmg_pnpn2
     type(gs_t), pointer :: gs_Xh => null()
     !> Strong pressure boundary conditions transferred to `X_h`.
     type(bc_list_t) :: bclst_Xh
-    !> Top-level overlapping Schwarz/FDM solver on the embedded `X_h` grid.
-    type(schwarz_t) :: schwarz_Xh
+    !> Top-level embedded mesh-1 FDM solver matching Nek `local_solves_fdm`.
+    type(fdm_t) :: top_fdm_Xh
     !> Middle and coarse GLL spaces of the H1 hierarchy.
     type(space_t) :: Xh_mg, Xh_crs
     !> Degree-of-freedom maps associated with the middle and coarse spaces.
@@ -123,14 +135,28 @@ module hsmg_pnpn2
     !> Fine-grid work vectors on the embedded `X_h` grid.
     type(field_t) :: r_Xh
     type(field_t) :: z_Xh
+    !> Nek `do_weight_op`-style multiplicity weights on the embedded pressure shell.
+    type(field_t) :: top_wt_Xh
     !> Middle-level residual, correction, and prolongation work fields.
     type(field_t) :: r_mg, e_mg, w_mg
     !> Coarse-level residual and correction fields.
     type(field_t) :: r_crs, e_crs
-    !> Explicit condensed coarse solver.
+    !> Dedicated sparse coarse solver for the Pn/Pn-2 H1 coarse grid.
     type(pnpn2_coarse_direct_t) :: crs_solver
-    !> True once the coarse solver has been constructed successfully.
+    !> Generic coarse-grid Krylov solver reused from the standard HSMG stack.
+    class(ksp_t), allocatable :: crs_ksp
+    !> Generic coarse-grid preconditioner reused from the standard HSMG stack.
+    class(pc_t), allocatable :: pc_crs_solver
+    !> Optional TreeAMG coarse solver reused from the standard HSMG stack.
+    type(tamg_solver_t), allocatable :: amg_solver
+    !> Coarse-grid H1 operator used by the generic coarse solvers.
+    class(ax_t), allocatable :: ax
+    !> Number of iterations requested for the reusable coarse solver path.
+    integer :: crs_niter = 10
+    !> True once the selected coarse solver has been constructed successfully.
     logical :: crs_solver_initialized = .false.
+    !> True when the dedicated Pn/Pn-2 coarse solver path is active.
+    logical :: use_direct_coarse = .true.
    contains
      !> Initialise all levels of the pressure-space V-cycle.
      procedure, pass(this) :: init => hsmg_pnpn2_init
@@ -143,9 +169,19 @@ module hsmg_pnpn2
      !> Force a coefficient object into the H1 form used by this preconditioner.
      procedure, pass(this), private :: set_h1_coeffs => &
           hsmg_pnpn2_set_h1_coeffs
+     !> Build the top-level pressure-shell weights used after the local FDM solve.
+     procedure, pass(this), private :: build_top_weight => &
+          hsmg_pnpn2_build_top_weight
+     !> Apply the top-level pressure-shell weights in-place.
+     procedure, pass(this), private :: weight_top_pressure => &
+          hsmg_pnpn2_weight_top_pressure
+     !> Apply Nek's coarse masked-DSS weight field.
+     procedure, pass(this), private :: weight_coarse_mask => &
+          hsmg_pnpn2_weight_coarse_mask
      !> Apply Nek-style restriction weights only on level boundaries.
      procedure, pass(this), private :: weight_restriction_boundary => &
           hsmg_pnpn2_weight_restriction_boundary
+     final :: hsmg_pnpn2_finalize
   end type hsmg_pnpn2_t
 
 contains
@@ -178,6 +214,9 @@ contains
     class(bc_t), pointer :: bc_i
     integer :: i, lx_crs, lx_mg
     logical :: coarse_null_space
+    character(len=:), allocatable :: crs_solver_type, crs_pc_type
+    logical :: crs_monitor
+    integer :: crs_tamg_lvls, crs_tamg_itrs, crs_tamg_cheby_degree
 
     call this%free()
 
@@ -190,6 +229,16 @@ contains
     lx_crs = 2
     lx_mg = hsmg_pnpn2_mid_lx(c_Xh%Xh%lx)
     coarse_null_space = .true.
+    call json_get_or_default(params, 'coarse_grid.solver', crs_solver_type, 'direct')
+    call json_get_or_default(params, 'coarse_grid.preconditioner', crs_pc_type, &
+         'jacobi')
+    call json_get_or_default(params, 'coarse_grid.monitor', crs_monitor, .false.)
+    call json_get_or_default(params, 'coarse_grid.iterations', this%crs_niter, 10)
+    call json_get_or_default(params, 'coarse_grid.levels', crs_tamg_lvls, 3)
+    call json_get_or_default(params, 'coarse_grid.cheby_degree', &
+         crs_tamg_cheby_degree, 4)
+    call json_get_or_default(params, 'coarse_grid.iterations', crs_tamg_itrs, 1)
+    this%use_direct_coarse = (trim(crs_solver_type) .eq. 'direct')
 
     ! Collect the strong fine-grid pressure conditions that define the `X_h`
     ! solve.  The same logical information is later transferred to the middle
@@ -205,10 +254,12 @@ contains
 
     ! Top level:
     ! - `r_Xh` and `z_Xh` are the embedded mesh-1 residual/correction fields;
-    ! - `schwarz_Xh` reproduces Nek's local FDM solve on the top H1 grid.
+    ! - `top_fdm_Xh` reproduces Nek's `local_solves_fdm` tensor solve on `X_h`.
     call this%r_Xh%init(dm_Xh, 'hsmg_pnpn2_r_Xh')
     call this%z_Xh%init(dm_Xh, 'hsmg_pnpn2_z_Xh')
-    call this%schwarz_Xh%init(c_Xh%Xh, dm_Xh, gs_Xh, this%bclst_Xh, c_Xh%msh)
+    call this%top_wt_Xh%init(dm_Xh, 'hsmg_pnpn2_top_wt_Xh')
+    call this%top_fdm_Xh%init_sem(c_Xh%Xh, dm_Xh, gs_Xh)
+    call this%build_top_weight()
 
     ! Fine pressure-grid work buffers.  These remain local to each element and
     ! therefore use `dm_Yh`, not the continuous `X_h` dofmap.
@@ -258,12 +309,39 @@ contains
     ! Finish the lower-level HSMG objects:
     ! - middle Schwarz smoother,
     ! - top-to-middle and middle-to-coarse interpolation operators,
-    ! - explicit condensed coarse solver.
+    ! - coarse solver, either the dedicated Pn/Pn-2 CRS-like path or the
+    !   alternative reusable HSMG path.
     call this%schwarz_mg%init(this%Xh_mg, this%dm_mg, this%gs_mg, &
          this%bclst_mg, c_Xh%msh)
     call this%interp_top_mg%init(Yh, this%Xh_mg)
     call this%interp_mg_crs%init(this%Xh_mg, this%Xh_crs)
-    call this%crs_solver%init(this%c_Xh, this%dm_Xh, this%dm_crs, coarse_null_space)
+    if (this%use_direct_coarse) then
+      call this%crs_solver%init(this%c_Xh, this%dm_Xh, this%dm_crs, coarse_null_space)
+    else if (trim(crs_solver_type) .eq. 'tamg') then
+      call ax_helm_factory(this%ax, full_formulation = .false.)
+      allocate(this%amg_solver)
+      call this%amg_solver%init(this%ax, this%Xh_crs, this%c_crs, c_Xh%msh, &
+           this%gs_crs, crs_tamg_lvls, this%bclst_crs, crs_tamg_itrs, &
+           crs_tamg_cheby_degree)
+    else
+      call ax_helm_factory(this%ax, full_formulation = .false.)
+      call precon_factory(this%pc_crs_solver, crs_pc_type)
+      select type (pc => this%pc_crs_solver)
+      type is (jacobi_t)
+        call pc%init(this%c_crs, this%dm_crs, this%gs_crs)
+      type is (sx_jacobi_t)
+        call pc%init(this%c_crs, this%dm_crs, this%gs_crs)
+      type is (device_jacobi_t)
+        call pc%init(this%c_crs, this%dm_crs, this%gs_crs)
+      type is (ident_t)
+      type is (device_ident_t)
+      class default
+        call neko_error('Unsupported PnPn-2 coarse-grid preconditioner.')
+      end select
+      call krylov_solver_factory(this%crs_ksp, this%dm_crs%size(), &
+           trim(crs_solver_type), KSP_MAX_ITER, M = this%pc_crs_solver, &
+           monitor = crs_monitor)
+    end if
     this%crs_solver_initialized = .true.
   end subroutine hsmg_pnpn2_init
 
@@ -273,21 +351,49 @@ contains
   !! level coefficient objects, and the explicit coarse solver.  Pointers back
   !! to the surrounding fluid scheme are nullified but not deallocated, because
   !! ownership stays with the caller.
+  subroutine hsmg_pnpn2_finalize(this)
+    type(hsmg_pnpn2_t), intent(inout) :: this
+    call this%free()
+  end subroutine hsmg_pnpn2_finalize
+
+  !> Release pressure-space HSMG storage (explicit).
+  !!
+  !! The routine frees all owned work fields, interpolation operators, lower
+  !! level coefficient objects, and the explicit coarse solver.  Pointers back
+  !! to the surrounding fluid scheme are nullified but not deallocated, because
+  !! ownership stays with the caller.
   subroutine hsmg_pnpn2_free(this)
     class(hsmg_pnpn2_t), intent(inout) :: this
 
-    call this%schwarz_Xh%free()
+    call this%top_fdm_Xh%free()
     call this%schwarz_mg%free()
     call this%interp_top_mg%free()
     call this%interp_mg_crs%free()
     if (this%crs_solver_initialized) then
-      call this%crs_solver%free()
+      if (this%use_direct_coarse) then
+        call this%crs_solver%free()
+      else
+        if (allocated(this%crs_ksp)) then
+          call this%crs_ksp%free()
+          deallocate(this%crs_ksp)
+        end if
+        if (allocated(this%pc_crs_solver)) then
+          call precon_destroy(this%pc_crs_solver)
+          deallocate(this%pc_crs_solver)
+        end if
+        if (allocated(this%amg_solver)) then
+          call this%amg_solver%free()
+          deallocate(this%amg_solver)
+        end if
+        if (allocated(this%ax)) deallocate(this%ax)
+      end if
       this%crs_solver_initialized = .false.
     end if
     call this%r_Yh%free()
     call this%w_Yh%free()
     call this%r_Xh%free()
     call this%z_Xh%free()
+    call this%top_wt_Xh%free()
     call this%r_mg%free()
     call this%e_mg%free()
     call this%w_mg%free()
@@ -328,7 +434,7 @@ contains
   !! 4. apply the middle Schwarz/FDM solve;
   !! 5. weight the middle residual on the level boundary before coarse
   !!    restriction;
-  !! 6. restrict to the coarse level and apply the explicit condensed solve;
+  !  ! 6. restrict to the coarse level and apply the dedicated coarse solve;
   !! 7. prolong the lower-level correction back through the hierarchy; and
   !! 8. combine the top `X_h` correction with the lower-level `Y_h`
   !!    contribution to form the final pressure correction.
@@ -341,6 +447,7 @@ contains
     integer :: ix, iy, iz, nelv
     integer :: nx, ny, nz, nxyz_y
     integer :: id_x, id_y
+    type(ksp_monitor_t) :: crs_info
 
     if (.not. associated(this%c_Xh)) then
       call neko_error('hsmg_pnpn2 used before initialization.')
@@ -385,9 +492,21 @@ contains
     end do
 
     ! Step 2:
-    ! Perform the top-level overlapping Schwarz/FDM solve on the embedded
-    ! `X_h` field.
-    call this%schwarz_Xh%compute(this%z_Xh%x, this%r_Xh%x)
+    ! Reproduce Nek's `local_solves_fdm` sequence on the embedded `X_h` field:
+    ! extend the shell to the true faces, exchange those face values, remove the
+    ! shell contribution, apply the lx1-sized tensor FDM, then fold the solved
+    ! face values back to the shell before weighting.
+    call hsmg_pnpn2_pressure_face_ext(this%r_Xh%x, nx, nx, this%c_Xh%Xh%lz, nelv)
+    call this%gs_Xh%op(this%r_Xh%x, this%dm_Xh%size(), GS_OP_ADD)
+    call hsmg_pnpn2_pressure_face_add1si(this%r_Xh%x, -1.0_rp, nx, nx, &
+         this%c_Xh%Xh%lz, nelv)
+    call this%top_fdm_Xh%compute(this%z_Xh%x, this%r_Xh%x)
+    call hsmg_pnpn2_pressure_shell_add_face(this%z_Xh%x, -1.0_rp, nx, nx, &
+         this%c_Xh%Xh%lz, nelv)
+    call this%gs_Xh%op(this%z_Xh%x, this%dm_Xh%size(), GS_OP_ADD)
+    call hsmg_pnpn2_pressure_shell_add_face(this%z_Xh%x, 1.0_rp, nx, nx, &
+         this%c_Xh%Xh%lz, nelv)
+    call this%weight_top_pressure(this%z_Xh%x)
     call copy(this%r_Yh%x, r, n)
 
     ! Step 3:
@@ -406,14 +525,27 @@ contains
     call this%weight_restriction_boundary(this%r_mg%x, this%c_mg)
 
     ! Step 6:
-    ! Restrict to the coarse grid.  Note that the explicit coarse solver
-    ! condenses shared coarse degrees of freedom internally, so this path does
-    ! not do an additional coarse-grid gather-scatter beforehand.
+    ! Restrict to the coarse grid.  The dedicated coarse solver works on the
+    ! unique coarse dofs internally, so this path does not do an additional
+    ! coarse-grid gather-scatter beforehand.
     call this%interp_mg_crs%map(this%r_crs%x, this%r_mg%x, nelv, this%Xh_crs)
-    call this%bclst_crs%apply_scalar(this%r_crs%x, this%dm_crs%size())
-
-    call this%crs_solver%solve(this%e_crs%x, this%r_crs%x, this%c_crs)
-    call this%bclst_crs%apply_scalar(this%e_crs%x, this%dm_crs%size())
+    if (this%use_direct_coarse) then
+      call this%weight_coarse_mask(this%r_crs%x, this%c_crs)
+      call this%crs_solver%solve(this%e_crs%x, this%r_crs%x, this%c_crs)
+      call this%weight_coarse_mask(this%e_crs%x, this%c_crs)
+    else
+      call this%gs_crs%op(this%r_crs%x, this%dm_crs%size(), GS_OP_ADD)
+      call this%bclst_crs%apply(this%r_crs)
+      call field_rzero(this%e_crs)
+      if (allocated(this%amg_solver)) then
+        call this%amg_solver%solve(this%e_crs%x, this%r_crs%x, this%dm_crs%size())
+      else
+        crs_info = this%crs_ksp%solve(this%ax, this%e_crs, this%r_crs%x, &
+             this%dm_crs%size(), this%c_crs, this%bclst_crs, this%gs_crs, &
+             this%crs_niter)
+      end if
+      call this%bclst_crs%apply_scalar(this%e_crs%x, this%dm_crs%size())
+    end if
 
     ! Step 7:
     ! Prolong the coarse correction back to the middle level and accumulate it
@@ -476,6 +608,135 @@ contains
     coef%ifh2 = .false.
   end subroutine hsmg_pnpn2_set_h1_coeffs
 
+  !> Build Nek's `do_weight_op` multiplicity weights on the embedded pressure shell.
+  !!
+  !! Nek initialises these weights by marking the pressure-space boundary nodes
+  !! inside the mesh-1 field, copying that shell to the true element faces,
+  !! gather-scattering the face values, and then accumulating the resulting
+  !! multiplicities back onto the shell.  The reciprocal of that count is then
+  !! used after the top local FDM solve.
+  !!
+  !! This routine mirrors that setup on Neko's embedded `X_h` field.  The final
+  !! field is `1` everywhere except on the pressure shell at indices
+  !! `2`/`nx-1`, where it stores the reciprocal multiplicity.
+  subroutine hsmg_pnpn2_build_top_weight(this)
+    class(hsmg_pnpn2_t), intent(inout) :: this
+    integer :: e, i, j, k
+    integer :: nx, ny, nz, nelv
+
+    nx = this%c_Xh%Xh%lx
+    ny = this%c_Xh%Xh%ly
+    nz = this%c_Xh%Xh%lz
+    nelv = this%c_Xh%msh%nelv
+
+    this%top_wt_Xh%x = 1.0_rp
+    call field_rzero(this%r_Xh)
+
+    ! Mark only the embedded pressure-space boundary shell.
+    if (this%c_Xh%msh%gdim .eq. 2) then
+      do e = 1, nelv
+        do j = 2, ny - 1
+          this%r_Xh%x(2,j,1,e) = 1.0_rp
+          this%r_Xh%x(nx - 1,j,1,e) = 1.0_rp
+        end do
+        do i = 2, nx - 1
+          this%r_Xh%x(i,2,1,e) = 1.0_rp
+          this%r_Xh%x(i,ny - 1,1,e) = 1.0_rp
+        end do
+      end do
+    else
+      do e = 1, nelv
+        do k = 2, nz - 1
+          do j = 2, ny - 1
+            this%r_Xh%x(2,j,k,e) = 1.0_rp
+            this%r_Xh%x(nx - 1,j,k,e) = 1.0_rp
+          end do
+        end do
+        do k = 2, nz - 1
+          do i = 2, nx - 1
+            this%r_Xh%x(i,2,k,e) = 1.0_rp
+            this%r_Xh%x(i,ny - 1,k,e) = 1.0_rp
+          end do
+        end do
+        do j = 2, ny - 1
+          do i = 2, nx - 1
+            this%r_Xh%x(i,j,2,e) = 1.0_rp
+            this%r_Xh%x(i,j,nz - 1,e) = 1.0_rp
+          end do
+        end do
+      end do
+    end if
+
+    ! Mirror Nek's init_weight_op:
+    ! 1. copy the shell to the true element faces,
+    ! 2. gather-scatter on those shared face nodes,
+    ! 3. subtract the local shell contribution from the face values, and
+    ! 4. accumulate the resulting multiplicity back onto the shell.
+    call hsmg_pnpn2_pressure_face_ext(this%r_Xh%x, nx, ny, nz, nelv)
+    call this%gs_Xh%op(this%r_Xh%x, this%dm_Xh%size(), GS_OP_ADD)
+    call hsmg_pnpn2_pressure_face_add1si(this%r_Xh%x, -1.0_rp, nx, ny, nz, nelv)
+    call hsmg_pnpn2_pressure_shell_add_face(this%r_Xh%x, 1.0_rp, nx, ny, nz, nelv)
+
+    ! Turn shell multiplicities into reciprocal weights and leave every other
+    ! point as unity so a plain pointwise multiplication reproduces do_weight_op.
+    if (this%c_Xh%msh%gdim .eq. 2) then
+      do e = 1, nelv
+        do j = 2, ny - 1
+          this%top_wt_Xh%x(2,j,1,e) = 1.0_rp / this%r_Xh%x(2,j,1,e)
+          this%top_wt_Xh%x(nx - 1,j,1,e) = 1.0_rp / this%r_Xh%x(nx - 1,j,1,e)
+        end do
+        do i = 2, nx - 1
+          this%top_wt_Xh%x(i,2,1,e) = 1.0_rp / this%r_Xh%x(i,2,1,e)
+          this%top_wt_Xh%x(i,ny - 1,1,e) = 1.0_rp / this%r_Xh%x(i,ny - 1,1,e)
+        end do
+      end do
+    else
+      do e = 1, nelv
+        do k = 2, nz - 1
+          do j = 2, ny - 1
+            this%top_wt_Xh%x(2,j,k,e) = 1.0_rp / this%r_Xh%x(2,j,k,e)
+            this%top_wt_Xh%x(nx - 1,j,k,e) = 1.0_rp / this%r_Xh%x(nx - 1,j,k,e)
+          end do
+        end do
+        do k = 2, nz - 1
+          do i = 2, nx - 1
+            this%top_wt_Xh%x(i,2,k,e) = 1.0_rp / this%r_Xh%x(i,2,k,e)
+            this%top_wt_Xh%x(i,ny - 1,k,e) = 1.0_rp / this%r_Xh%x(i,ny - 1,k,e)
+          end do
+        end do
+        do j = 2, ny - 1
+          do i = 2, nx - 1
+            this%top_wt_Xh%x(i,j,2,e) = 1.0_rp / this%r_Xh%x(i,j,2,e)
+            this%top_wt_Xh%x(i,j,nz - 1,e) = 1.0_rp / this%r_Xh%x(i,j,nz - 1,e)
+          end do
+        end do
+      end do
+    end if
+
+    call field_rzero(this%r_Xh)
+  end subroutine hsmg_pnpn2_build_top_weight
+
+  !> Apply Nek's top-level pressure-shell weights after the local FDM solve.
+  !!
+  !! @param u Embedded `X_h` correction to be weighted in-place.
+  subroutine hsmg_pnpn2_weight_top_pressure(this, u)
+    class(hsmg_pnpn2_t), intent(inout) :: this
+    real(kind=rp), intent(inout) :: u(:,:,:,:)
+
+    u = u * this%top_wt_Xh%x
+  end subroutine hsmg_pnpn2_weight_top_pressure
+
+  !> Apply Nek's coarse `mg_mask` weighting in-place.
+  !!
+  !! @param u Coarse residual or correction field to be weighted in-place.
+  subroutine hsmg_pnpn2_weight_coarse_mask(this, u, coef)
+    class(hsmg_pnpn2_t), intent(inout) :: this
+    type(coef_t), intent(in) :: coef
+    real(kind=rp), intent(inout) :: u(:,:,:,:)
+
+    call this%bclst_crs%apply_scalar(u, this%dm_crs%size())
+  end subroutine hsmg_pnpn2_weight_coarse_mask
+
   !> Apply Nek-style restriction weights on boundary points only.
   !!
   !! @param u Residual field to be weighted in-place.
@@ -483,7 +744,9 @@ contains
   !!
   !! Nek's `hsmg_do_wt` multiplies only the level-boundary points by reciprocal
   !! sharing counts before fine-to-coarse restriction.  Interior points are left
-  !! unchanged.  This helper reproduces that contract using `coef%mult`.
+  !! unchanged.  On the Neko H1 levels the coefficient multiplicity field is
+  !! already the level-local reciprocal DSS count, so restricting the action to
+  !! boundary points reproduces the same data used by Nek's `mg_rstr_wt`.
   subroutine hsmg_pnpn2_weight_restriction_boundary(this, u, coef)
     class(hsmg_pnpn2_t), intent(inout) :: this
     type(coef_t), intent(in) :: coef
@@ -529,6 +792,137 @@ contains
       end do
     end if
   end subroutine hsmg_pnpn2_weight_restriction_boundary
+
+  !> Copy the embedded pressure shell to the true element faces.
+  !!
+  !! This is the mesh-1 analogue of Nek's `dface_ext` used in `init_weight_op`.
+  subroutine hsmg_pnpn2_pressure_face_ext(u, nx, ny, nz, nelv)
+    integer, intent(in) :: nx, ny, nz, nelv
+    real(kind=rp), intent(inout) :: u(nx, ny, nz, nelv)
+    integer :: e, i, j, k
+
+    if (nz .eq. 1) then
+      do e = 1, nelv
+        do i = 2, nx - 1
+          u(i,1,1,e) = u(i,2,1,e)
+          u(i,ny,1,e) = u(i,ny - 1,1,e)
+        end do
+        do j = 2, ny - 1
+          u(1,j,1,e) = u(2,j,1,e)
+          u(nx,j,1,e) = u(nx - 1,j,1,e)
+        end do
+      end do
+    else
+      do e = 1, nelv
+        do k = 2, nz - 1
+          do i = 2, nx - 1
+            u(i,1,k,e) = u(i,2,k,e)
+            u(i,ny,k,e) = u(i,ny - 1,k,e)
+          end do
+        end do
+        do k = 2, nz - 1
+          do j = 2, ny - 1
+            u(1,j,k,e) = u(2,j,k,e)
+            u(nx,j,k,e) = u(nx - 1,j,k,e)
+          end do
+        end do
+        do j = 2, ny - 1
+          do i = 2, nx - 1
+            u(i,j,1,e) = u(i,j,2,e)
+            u(i,j,nz,e) = u(i,j,nz - 1,e)
+          end do
+        end do
+      end do
+    end if
+  end subroutine hsmg_pnpn2_pressure_face_ext
+
+  !> Add a scaled shell contribution to the true element faces.
+  !!
+  !! This mirrors Nek's `dface_add1si` for the embedded pressure shell.
+  subroutine hsmg_pnpn2_pressure_face_add1si(u, c, nx, ny, nz, nelv)
+    integer, intent(in) :: nx, ny, nz, nelv
+    real(kind=rp), intent(in) :: c
+    real(kind=rp), intent(inout) :: u(nx, ny, nz, nelv)
+    integer :: e, i, j, k
+
+    if (nz .eq. 1) then
+      do e = 1, nelv
+        do i = 2, nx - 1
+          u(i,1,1,e) = u(i,1,1,e) + c * u(i,2,1,e)
+          u(i,ny,1,e) = u(i,ny,1,e) + c * u(i,ny - 1,1,e)
+        end do
+        do j = 2, ny - 1
+          u(1,j,1,e) = u(1,j,1,e) + c * u(2,j,1,e)
+          u(nx,j,1,e) = u(nx,j,1,e) + c * u(nx - 1,j,1,e)
+        end do
+      end do
+    else
+      do e = 1, nelv
+        do k = 2, nz - 1
+          do i = 2, nx - 1
+            u(i,1,k,e) = u(i,1,k,e) + c * u(i,2,k,e)
+            u(i,ny,k,e) = u(i,ny,k,e) + c * u(i,ny - 1,k,e)
+          end do
+        end do
+        do k = 2, nz - 1
+          do j = 2, ny - 1
+            u(1,j,k,e) = u(1,j,k,e) + c * u(2,j,k,e)
+            u(nx,j,k,e) = u(nx,j,k,e) + c * u(nx - 1,j,k,e)
+          end do
+        end do
+        do j = 2, ny - 1
+          do i = 2, nx - 1
+            u(i,j,1,e) = u(i,j,1,e) + c * u(i,j,2,e)
+            u(i,j,nz,e) = u(i,j,nz,e) + c * u(i,j,nz - 1,e)
+          end do
+        end do
+      end do
+    end if
+  end subroutine hsmg_pnpn2_pressure_face_add1si
+
+  !> Add a scaled face contribution back to the embedded pressure shell.
+  !!
+  !! This is the embedded-shell equivalent of Nek's `s_face_to_int`.
+  subroutine hsmg_pnpn2_pressure_shell_add_face(u, c, nx, ny, nz, nelv)
+    integer, intent(in) :: nx, ny, nz, nelv
+    real(kind=rp), intent(in) :: c
+    real(kind=rp), intent(inout) :: u(nx, ny, nz, nelv)
+    integer :: e, i, j, k
+
+    if (nz .eq. 1) then
+      do e = 1, nelv
+        do i = 2, nx - 1
+          u(i,2,1,e) = u(i,2,1,e) + c * u(i,1,1,e)
+          u(i,ny - 1,1,e) = u(i,ny - 1,1,e) + c * u(i,ny,1,e)
+        end do
+        do j = 2, ny - 1
+          u(2,j,1,e) = u(2,j,1,e) + c * u(1,j,1,e)
+          u(nx - 1,j,1,e) = u(nx - 1,j,1,e) + c * u(nx,j,1,e)
+        end do
+      end do
+    else
+      do e = 1, nelv
+        do k = 2, nz - 1
+          do i = 2, nx - 1
+            u(i,2,k,e) = u(i,2,k,e) + c * u(i,1,k,e)
+            u(i,ny - 1,k,e) = u(i,ny - 1,k,e) + c * u(i,ny,k,e)
+          end do
+        end do
+        do k = 2, nz - 1
+          do j = 2, ny - 1
+            u(2,j,k,e) = u(2,j,k,e) + c * u(1,j,k,e)
+            u(nx - 1,j,k,e) = u(nx - 1,j,k,e) + c * u(nx,j,k,e)
+          end do
+        end do
+        do j = 2, ny - 1
+          do i = 2, nx - 1
+            u(i,j,2,e) = u(i,j,2,e) + c * u(i,j,1,e)
+            u(i,j,nz - 1,e) = u(i,j,nz - 1,e) + c * u(i,j,nz,e)
+          end do
+        end do
+      end do
+    end if
+  end subroutine hsmg_pnpn2_pressure_shell_add_face
 
   !> Return Nek's middle HSMG point count for the current velocity GLL count.
   !!

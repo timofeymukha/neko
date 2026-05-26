@@ -95,8 +95,10 @@ module fdm
      type(dofmap_t), pointer :: dof => null()
      type(gs_t), pointer :: gs_h => null()
      type(mesh_t), pointer :: msh => null()
+    integer :: nl = 0
    contains
      procedure, pass(this) :: init => fdm_init
+     procedure, pass(this) :: init_sem => fdm_init_sem
      procedure, pass(this) :: free => fdm_free
      procedure, pass(this) :: compute => fdm_compute
   end type fdm_t
@@ -121,6 +123,7 @@ contains
     nl = Xh%lx + 2 !Schwarz!
     nelv = dof%msh%nelv
     call fdm_free(this)
+    this%nl = nl
     allocate(this%s(nl*nl, 2, dof%msh%gdim, dof%msh%nelv))
     allocate(this%d(nl**3, dof%msh%nelv))
     allocate(this%swplen(Xh%lx, Xh%lx, Xh%lx, dof%msh%nelv))
@@ -157,6 +160,59 @@ contains
             Xh%lxyz*dof%msh%nelv, HOST_TO_DEVICE, sync = .false.)
     end if
   end subroutine fdm_init
+
+  subroutine fdm_init_sem(this, Xh, dof, gs_h)
+   class(fdm_t), intent(inout) :: this
+   type(space_t), target, intent(inout) :: Xh
+   type(dofmap_t), target, intent(in) :: dof
+   type(gs_t), target, intent(inout) :: gs_h
+   integer :: nl, n, nelv
+   real(kind=rp) :: ah(0:Xh%lx-1, 0:Xh%lx-1), bh(0:Xh%lx-1)
+   real(kind=rp) :: ch(0:Xh%lx-1, 0:Xh%lx-1), dh(0:Xh%lx-1, 0:Xh%lx-1)
+   real(kind=rp) :: zh(0:Xh%lx-1), wh(0:2*Xh%lx-1)
+   real(kind=rp) :: dph(0:Xh%lx-1, 1:Xh%lx-2), jph(0:Xh%lx-1, 1:Xh%lx-2)
+   real(kind=rp) :: bgl(1:Xh%lx-2), zglhat(1:Xh%lx-2)
+   real(kind=rp) :: dgl(1:Xh%lx-2, 0:Xh%lx-1), jgl(1:Xh%lx-2, 0:Xh%lx-1)
+
+   n = Xh%lx - 1
+   nl = Xh%lx
+   nelv = dof%msh%nelv
+   call fdm_free(this)
+   this%nl = nl
+   allocate(this%s(nl*nl, 2, dof%msh%gdim, dof%msh%nelv))
+   allocate(this%d(nl**3, dof%msh%nelv))
+   allocate(this%swplen(Xh%lx, Xh%ly, Xh%lz, dof%msh%nelv))
+   allocate(this%len_lr(nelv), this%len_ls(nelv), this%len_lt(nelv))
+   allocate(this%len_mr(nelv), this%len_ms(nelv), this%len_mt(nelv))
+   allocate(this%len_rr(nelv), this%len_rs(nelv), this%len_rt(nelv))
+
+   call rzero(this%swplen, Xh%lxyz * dof%msh%nelv)
+
+   if (NEKO_BCKND_DEVICE .eq. 1) then
+      call device_map(this%s, this%s_d, nl*nl*2*dof%msh%gdim*dof%msh%nelv)
+      call device_map(this%d, this%d_d, nl**dof%msh%gdim*dof%msh%nelv)
+      call device_map(this%swplen, this%swplen_d, Xh%lxyz*dof%msh%nelv)
+   end if
+
+   call semhat(ah, bh, ch, dh, zh, dph, jph, bgl, zglhat, dgl, jgl, n, wh)
+   call fdm_do_semhat_weight(jgl, dgl, bgl, n)
+   this%Xh => Xh
+   this%dof => dof
+   this%gs_h => gs_h
+   this%msh => dof%msh
+
+   call swap_lengths(this, dof%x, dof%y, dof%z, dof%msh%nelv, dof%msh%gdim)
+   call fdm_setup_fast_sem(this, bh, dgl, jgl, nl, n)
+
+   if (NEKO_BCKND_DEVICE .eq. 1) then
+      call device_memcpy(this%s, this%s_d, &
+           nl*nl*2*dof%msh%gdim*dof%msh%nelv, HOST_TO_DEVICE, sync = .false.)
+      call device_memcpy(this%d, this%d_d, &
+           nl**dof%msh%gdim*dof%msh%nelv, HOST_TO_DEVICE, sync = .false.)
+      call device_memcpy(this%swplen, this%swplen_d, &
+           Xh%lxyz*dof%msh%nelv, HOST_TO_DEVICE, sync = .false.)
+   end if
+  end subroutine fdm_init_sem
 
   subroutine swap_lengths(this, x, y, z, nelv, gdim)
     type(fdm_t), intent(inout) :: this
@@ -404,6 +460,220 @@ contains
 
   end subroutine fdm_setup_fast
 
+  subroutine fdm_do_semhat_weight(jgl, dgl, bgl, n)
+    integer, intent(in) :: n
+    real(kind=rp), intent(inout) :: jgl(1:n-1, 0:n), dgl(1:n-1, 0:n)
+    real(kind=rp), intent(in) :: bgl(1:n-1)
+    integer :: i, j
+
+    do j = 0, n
+       do i = 1, n - 1
+          jgl(i, j) = bgl(i) * jgl(i, j)
+          dgl(i, j) = bgl(i) * dgl(i, j)
+       end do
+    end do
+  end subroutine fdm_do_semhat_weight
+
+  subroutine fdm_setup_fast_sem(this, bh, dgl, jgl, nl, n)
+    integer, intent(in) :: nl, n
+    type(fdm_t), intent(inout) :: this
+    real(kind=rp), intent(in) :: bh(0:n)
+    real(kind=rp), intent(in) :: dgl(1:n-1, 0:n), jgl(1:n-1, 0:n)
+    real(kind=rp), dimension(2*this%Xh%lx + 4) :: lr, ls, lt
+    integer :: i, j, k
+    integer :: ie, il, nr, ns, nt
+    integer :: lbr, rbr, lbs, rbs, lbt, rbt
+    real(kind=rp) :: eps, diag
+
+    associate(s => this%s, d => this%d, &
+         llr => this%len_lr, lls => this%len_ls, llt => this%len_lt, &
+         lmr => this%len_mr, lms => this%len_ms, lmt => this%len_mt, &
+         lrr => this%len_rr, lrs => this%len_rs, lrt => this%len_rt)
+      do ie = 1, this%dof%msh%nelv
+         lbr = this%dof%msh%facet_type(1, ie)
+         rbr = this%dof%msh%facet_type(2, ie)
+         lbs = this%dof%msh%facet_type(3, ie)
+         rbs = this%dof%msh%facet_type(4, ie)
+         lbt = this%dof%msh%facet_type(5, ie)
+         rbt = this%dof%msh%facet_type(6, ie)
+
+         nr = nl
+         ns = nl
+         nt = nl
+         call fdm_setup_fast1d_sem(s(1, 1, 1, ie), lr, nr, lbr, rbr, &
+              llr(ie), lmr(ie), lrr(ie), bh, dgl, jgl, n)
+         call fdm_setup_fast1d_sem(s(1, 1, 2, ie), ls, ns, lbs, rbs, &
+              lls(ie), lms(ie), lrs(ie), bh, dgl, jgl, n)
+         if (this%dof%msh%gdim .eq. 3) then
+            call fdm_setup_fast1d_sem(s(1, 1, 3, ie), lt, nt, lbt, rbt, &
+                 llt(ie), lmt(ie), lrt(ie), bh, dgl, jgl, n)
+         end if
+
+         il = 1
+         if (.not. this%dof%msh%gdim .eq. 3) then
+            eps = 1d-5 * (vlmax(lr(2), nr - 2) + vlmax(ls(2), ns - 2))
+            do j = 1, ns
+               do i = 1, nr
+                  diag = lr(i) + ls(j)
+                  if (diag .gt. eps) then
+                     d(il, ie) = 1.0_rp / diag
+                  else
+                     d(il, ie) = 0.0_rp
+                  end if
+                  il = il + 1
+               end do
+            end do
+         else
+            eps = 1d-5 * (vlmax(lr(2), nr - 2) + &
+                 vlmax(ls(2), ns - 2) + vlmax(lt(2), nt - 2))
+            do k = 1, nt
+               do j = 1, ns
+                  do i = 1, nr
+                     diag = lr(i) + ls(j) + lt(k)
+                     if (diag .gt. eps) then
+                        d(il, ie) = 1.0_rp / diag
+                     else
+                        d(il, ie) = 0.0_rp
+                     end if
+                     il = il + 1
+                  end do
+               end do
+            end do
+         end if
+      end do
+    end associate
+
+  end subroutine fdm_setup_fast_sem
+
+  subroutine fdm_setup_fast1d_sem(s, lam, nl, lbc, rbc, ll, lm, lr, bh, dgl, jgl, n)
+    integer, intent(in) :: nl, lbc, rbc, n
+    real(kind=rp), intent(inout) :: s(0:n, 0:n, 2), lam(nl), ll, lm, lr
+    real(kind=rp), intent(in) :: bh(0:n)
+    real(kind=rp), intent(in) :: dgl(1:n-1, 0:n), jgl(1:n-1, 0:n)
+    integer :: bb0, bb1, eb0, eb1
+    logical :: l, r
+    real(kind=rp) :: b(0:n, 0:n)
+
+    if (lbc .eq. 2 .or. lbc .eq. 3) then
+       eb0 = 1
+    else
+       eb0 = 0
+    end if
+    if (rbc .eq. 2 .or. rbc .eq. 3) then
+       eb1 = n - 1
+    else
+       eb1 = n
+    end if
+    if (lbc .eq. 2) then
+       bb0 = 1
+    else
+       bb0 = 0
+    end if
+    if (rbc .eq. 2) then
+       bb1 = n - 1
+    else
+       bb1 = n
+    end if
+
+    l = (lbc .eq. 0)
+    r = (rbc .eq. 0)
+
+    call fdm_setup_fast1d_sem_op(s(0, 0, 1), eb0, eb1, l, r, ll, lm, lr, bh, &
+         dgl, 0, n)
+    call fdm_setup_fast1d_sem_op(b, bb0, bb1, l, r, ll, lm, lr, bh, jgl, 1, n)
+
+    call generalev(s(0, 0, 1), b, lam, nl, nl)
+    if (.not. l) call row_zero(s(0, 0, 1), nl, nl, 1)
+    if (.not. r) call row_zero(s(0, 0, 1), nl, nl, nl)
+    call trsp(s(0, 0, 2), nl, s(0, 0, 1), nl)
+  end subroutine fdm_setup_fast1d_sem
+
+  subroutine fdm_setup_fast1d_sem_op(g, b0, b1, l, r, ll, lm, lr, bh, jgl, jscl, n)
+    integer, intent(in) :: b0, b1, jscl, n
+    logical, intent(in) :: l, r
+    real(kind=rp), intent(inout) :: g(0:n, 0:n)
+    real(kind=rp), intent(in) :: bh(0:n), jgl(1:n-1, 0:n)
+    real(kind=rp), intent(in) :: ll, lm, lr
+    real(kind=rp) :: bl(0:n), bm(0:n), br(0:n)
+    real(kind=rp) :: gl, gm, gr, gll, glm, gmm, gmr, grr
+    integer :: i, j, k
+
+    if (jscl .eq. 0) then
+       gl = 1.0_rp
+       gm = 1.0_rp
+       gr = 1.0_rp
+    else
+       gl = 0.5_rp * ll
+       gm = 0.5_rp * lm
+       gr = 0.5_rp * lr
+    end if
+    gll = gl * gl
+    glm = gl * gm
+    gmm = gm * gm
+    gmr = gm * gr
+    grr = gr * gr
+
+    do i = 1, n - 1
+       bm(i) = 2.0_rp / (lm * bh(i))
+    end do
+    if (b0 .eq. 0) then
+       bm(0) = 0.5_rp * lm * bh(0)
+       if (l) bm(0) = bm(0) + 0.5_rp * ll * bh(n)
+       bm(0) = 1.0_rp / bm(0)
+    end if
+    if (b1 .eq. n) then
+       bm(n) = 0.5_rp * lm * bh(n)
+       if (r) bm(n) = bm(n) + 0.5_rp * lr * bh(0)
+       bm(n) = 1.0_rp / bm(n)
+    end if
+
+    if (l) then
+       do i = 0, n - 1
+          bl(i) = 2.0_rp / (ll * bh(i))
+       end do
+       bl(n) = bm(0)
+    end if
+    if (r) then
+       do i = 1, n
+          br(i) = 2.0_rp / (lr * bh(i))
+       end do
+       br(0) = bm(n)
+    end if
+
+    call rzero(g, (n + 1) * (n + 1))
+    do j = 1, n - 1
+       do i = 1, n - 1
+          do k = b0, b1
+             g(i, j) = g(i, j) + gmm * jgl(i, k) * bm(k) * jgl(j, k)
+          end do
+       end do
+    end do
+
+    if (l) then
+       do i = 1, n - 1
+          g(i, 0) = glm * jgl(i, 0) * bm(0) * jgl(n - 1, n)
+          g(0, i) = g(i, 0)
+       end do
+       do i = 0, n
+          g(0, 0) = g(0, 0) + gll * jgl(n - 1, i) * bl(i) * jgl(n - 1, i)
+       end do
+    else
+       g(0, 0) = 1.0_rp
+    end if
+
+    if (r) then
+       do i = 1, n - 1
+          g(i, n) = gmr * jgl(i, n) * bm(n) * jgl(1, 0)
+          g(n, i) = g(i, n)
+       end do
+       do i = 0, n
+          g(n, n) = g(n, n) + grr * jgl(1, i) * br(i) * jgl(1, i)
+       end do
+    else
+       g(n, n) = 1.0_rp
+    end if
+  end subroutine fdm_setup_fast1d_sem_op
+
   subroutine fdm_setup_fast1d(s, lam, nl, lbc, rbc, ll, lm, lr, ah, bh, n)
     integer, intent(in) :: nl, lbc, rbc, n
     real(kind=rp), intent(inout) :: s(nl, nl, 2), lam(nl), ll, lm, lr
@@ -616,6 +886,7 @@ contains
        deallocate(this%swplen)
     end if
 
+    this%nl = 0
     nullify(this%Xh)
     nullify(this%dof)
     nullify(this%gs_h)
@@ -635,7 +906,7 @@ contains
 
   subroutine fdm_compute(this, e, r, stream)
     class(fdm_t), intent(inout) :: this
-    real(kind=rp), dimension((this%Xh%lx + 2)**3, this%msh%nelv), &
+    real(kind=rp), dimension(this%nl**this%msh%gdim, this%msh%nelv), &
          intent(inout) :: e, r
     type(c_ptr), optional :: stream
     type(c_ptr) :: strm
@@ -648,16 +919,16 @@ contains
 
     if (NEKO_BCKND_SX .eq. 1) then
        call fdm_do_fast_sx(e, r, this%s, this%d, &
-            this%Xh%lx+2, this%msh%gdim, this%msh%nelv)
+            this%nl, this%msh%gdim, this%msh%nelv)
     else if (NEKO_BCKND_XSMM .eq. 1) then
        call fdm_do_fast_xsmm(e, r, this%s, this%d, &
-            this%Xh%lx+2, this%msh%gdim, this%msh%nelv)
+            this%nl, this%msh%gdim, this%msh%nelv)
     else if (NEKO_BCKND_DEVICE .eq. 1) then
        call fdm_do_fast_device(e, r, this%s, this%d, &
-            this%Xh%lx+2, this%msh%gdim, this%msh%nelv, strm)
+            this%nl, this%msh%gdim, this%msh%nelv, strm)
     else
        call fdm_do_fast_cpu(e, r, this%s, this%d, &
-            this%Xh%lx+2, this%msh%gdim, this%msh%nelv)
+            this%nl, this%msh%gdim, this%msh%nelv)
     end if
 
   end subroutine fdm_compute

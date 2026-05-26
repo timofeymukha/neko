@@ -39,7 +39,7 @@ module fluid_pnpn2
   use bc_list, only : bc_list_t
   use checkpoint, only : chkp_t
   use coefs, only : coef_t
-  use comm, only : NEKO_COMM
+  use comm, only : NEKO_COMM, MPI_EXTRA_PRECISION
   use dofmap, only : dofmap_t
   use field, only : field_t
   use field_math, only : field_add2, field_cmult, field_rzero
@@ -60,11 +60,11 @@ module fluid_pnpn2
        json_get_or_lookup_or_default, json_extract_item
   use krylov, only : ksp_monitor_t
   use logger, only : neko_log, LOG_SIZE
-  use math, only : add2, add2s2, col2, cmult2, copy, glsc2, glsum, rzero
+  use math, only : add2, add2s2, col2, cmult2, copy, glsc2, glsum, rzero, vlsc2
   use mathops, only : opadd2cm
   use mesh, only : mesh_t
   use mpi_f08, only : MPI_Allreduce, MPI_IN_PLACE, MPI_INTEGER, MPI_LOGICAL, &
-       MPI_LOR, MPI_MAX
+       MPI_LOR, MPI_MAX, MPI_SUM
   use mxm_wrapper, only : mxm
   use neko_config, only : NEKO_BCKND_DEVICE
   use no_slip, only : no_slip_t
@@ -591,15 +591,16 @@ contains
    integer(kind=i8), intent(in) :: glb_prs_points
    type(ksp_monitor_t) :: ksp_results
    character(len=LOG_SIZE) :: log_buf
-   integer :: i, j, k
+   integer :: i, ierr, j, k
    integer :: iter, restart_len, m_used
-   real(kind=rp) :: norm_fac, rnorm
+   real(kind=rp) :: norm_fac, rnorm, tol_goal
    real(kind=xp) :: alpha, lr, temp
    logical :: converged
 
    converged = .false.
    iter = 0
    rnorm = 0.0_rp
+   tol_goal = abs(this%abs_tol)
    restart_len = min(this%lgmres, this%max_iter)
 
    if (restart_len .le. 0) then
@@ -639,6 +640,9 @@ contains
 
      if (iter .eq. 0) then
        ksp_results%res_start = real(this%gamma(1), rp) * norm_fac
+       if (this%abs_tol .lt. 0.0_rp) then
+         tol_goal = abs(this%abs_tol) * ksp_results%res_start
+       end if
      end if
 
      if (this%gamma(1) .eq. 0.0_xp) then
@@ -666,7 +670,11 @@ contains
        call col2(this%w_hat, this%ml, n)
 
        do i = 1, j
-         this%h(i,j) = real(glsc2(this%w_hat, this%v(1,i), n), xp)
+         this%h(i,j) = real(vlsc2(this%w_hat, this%v(1,i), n), xp)
+       end do
+       call MPI_Allreduce(MPI_IN_PLACE, this%h(1,j), j, MPI_EXTRA_PRECISION, &
+            MPI_SUM, NEKO_COMM, ierr)
+       do i = 1, j
          call add2s2(this%w_hat, this%v(1,i), -real(this%h(i,j), rp), n)
        end do
 
@@ -701,7 +709,7 @@ contains
          call neko_log%message(log_buf)
        end if
 
-       if (rnorm .lt. this%abs_tol) then
+       if (rnorm .lt. tol_goal) then
          converged = .true.
          exit
        end if
@@ -736,15 +744,17 @@ contains
 
    ksp_results%iter = iter
    ksp_results%res_final = rnorm
-   ksp_results%converged = converged .and. (rnorm .le. this%abs_tol)
+   ksp_results%converged = converged .and. (rnorm .le. tol_goal)
   end function pnpn2_prs_gmres_solve
 
-  !> Initialize lower-order GL pressure coefficients without any gather-scatter.
-  subroutine pnpn2_pressure_coef_init(c, msh, Yh, dm)
+  !> Initialize lower-order GL pressure coefficients directly on `Y_h`.
+  subroutine pnpn2_pressure_coef_init(c, msh, Yh, dm, c_Xh, prs_interp)
     type(coef_t), intent(inout), target :: c
     type(mesh_t), target, intent(inout) :: msh
     type(space_t), target, intent(inout) :: Yh
     type(dofmap_t), target, intent(inout) :: dm
+    type(coef_t), intent(in) :: c_Xh
+    type(interpolator_t), intent(inout) :: prs_interp
     integer :: e, i, lxy, lyz, lxyz, ntot
 
     call c%free()
@@ -816,8 +826,8 @@ contains
       end if
     end do
 
-    if (msh%gdim .eq. 2) then
-      do i = 1, ntot
+    do i = 1, ntot
+      if (msh%gdim .eq. 2) then
         c%jac(i,1,1,1) = c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) - &
              c%dxds(i,1,1,1) * c%dydr(i,1,1,1)
         c%drdx(i,1,1,1) = c%dyds(i,1,1,1)
@@ -829,9 +839,7 @@ contains
         c%dtdx(i,1,1,1) = 0.0_rp
         c%dtdy(i,1,1,1) = 0.0_rp
         c%dtdz(i,1,1,1) = 1.0_rp
-      end do
-    else
-      do i = 1, ntot
+      else
         c%jac(i,1,1,1) = &
              c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) * c%dzdt(i,1,1,1) + &
              c%dxdt(i,1,1,1) * c%dydr(i,1,1,1) * c%dzds(i,1,1,1) + &
@@ -857,23 +865,8 @@ contains
              c%dxdr(i,1,1,1) * c%dzds(i,1,1,1)
         c%dtdz(i,1,1,1) = c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) - &
              c%dxds(i,1,1,1) * c%dydr(i,1,1,1)
-      end do
-    end if
-
-    do i = 1, ntot
+      end if
       c%jacinv(i,1,1,1) = 1.0_rp / c%jac(i,1,1,1)
-      c%drdx(i,1,1,1) = c%drdx(i,1,1,1) * c%jacinv(i,1,1,1)
-      c%drdy(i,1,1,1) = c%drdy(i,1,1,1) * c%jacinv(i,1,1,1)
-      c%drdz(i,1,1,1) = c%drdz(i,1,1,1) * c%jacinv(i,1,1,1)
-      c%dsdx(i,1,1,1) = c%dsdx(i,1,1,1) * c%jacinv(i,1,1,1)
-      c%dsdy(i,1,1,1) = c%dsdy(i,1,1,1) * c%jacinv(i,1,1,1)
-      c%dsdz(i,1,1,1) = c%dsdz(i,1,1,1) * c%jacinv(i,1,1,1)
-      c%dtdx(i,1,1,1) = c%dtdx(i,1,1,1) * c%jacinv(i,1,1,1)
-      c%dtdy(i,1,1,1) = c%dtdy(i,1,1,1) * c%jacinv(i,1,1,1)
-      c%dtdz(i,1,1,1) = c%dtdz(i,1,1,1) * c%jacinv(i,1,1,1)
-    end do
-
-    do i = 1, ntot
       c%G11(i,1,1,1) = (c%drdx(i,1,1,1)**2 + c%drdy(i,1,1,1)**2 + &
            c%drdz(i,1,1,1)**2) * c%jacinv(i,1,1,1)
       c%G22(i,1,1,1) = (c%dsdx(i,1,1,1)**2 + c%dsdy(i,1,1,1)**2 + &
@@ -949,8 +942,9 @@ contains
 
     call this%dm_Yh%init(msh, this%Yh)
     call this%gs_prs%init_noop(this%dm_Yh)
-    call pnpn2_pressure_coef_init(this%c_Yh, msh, this%Yh, this%dm_Yh)
     call this%prs_interp%init(this%Xh, this%Yh)
+    call pnpn2_pressure_coef_init(this%c_Yh, msh, this%Yh, this%dm_Yh, &
+         this%c_Xh, this%prs_interp)
 
     call neko_registry%add_field(this%dm_Xh, 'p')
     this%p => neko_registry%get_field('p')

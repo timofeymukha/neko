@@ -38,6 +38,7 @@ submodule (precon) precon_fctry
   use device_jacobi, only : device_jacobi_t
   use hsmg, only : hsmg_t
   use phmg, only : phmg_t
+  use hsmg_pnpn2, only : hsmg_pnpn2_t
   use utils, only : neko_type_error
   use neko_config, only : NEKO_BCKND_DEVICE, NEKO_BCKND_SX
   implicit none
@@ -99,6 +100,8 @@ contains
        type is (device_jacobi_t)
           call pcp%free()
        type is (hsmg_t)
+          call pcp%free()
+       type is (hsmg_pnpn2_t)
           call pcp%free()
        type is (phmg_t)
           call pcp%free()
