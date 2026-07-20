@@ -12,10 +12,25 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 VALIDATOR = REPO_ROOT / "contrib" / "validate_case_schema.py"
 EXAMPLES_DIR = REPO_ROOT / "examples"
 TESTS_DIR = REPO_ROOT / "tests"
-CASE_FILES = (
-    sorted(EXAMPLES_DIR.rglob("*.case"))
-    + sorted(EXAMPLES_DIR.rglob("*.json"))
-    + sorted(TESTS_DIR.rglob("*.case"))
+
+
+def tracked_files(directory, suffixes):
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", str(directory.relative_to(REPO_ROOT))],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return sorted(
+        REPO_ROOT / path
+        for path in result.stdout.split("\0")
+        if path and Path(path).suffix in suffixes
+    )
+
+
+CASE_FILES = tracked_files(EXAMPLES_DIR, {".case", ".json"}) + tracked_files(
+    TESTS_DIR, {".case"}
 )
 
 
