@@ -60,12 +60,12 @@ module fluid_pnpn2
        json_get_or_lookup_or_default, json_extract_item
   use krylov, only : ksp_monitor_t
   use logger, only : neko_log, LOG_SIZE
-  use math, only : add2, add2s2, col2, cmult2, copy, glsc2, glsum, rzero, vlsc2
+  use math, only : add2, add2s2, col2, cmult, cmult2, copy, glsc2, glsum, &
+       rzero, vlsc2
   use mathops, only : opadd2cm
   use mesh, only : mesh_t
   use mpi_f08, only : MPI_Allreduce, MPI_IN_PLACE, MPI_INTEGER, MPI_LOGICAL, &
        MPI_LOR, MPI_MAX, MPI_SUM
-  use mxm_wrapper, only : mxm
   use neko_config, only : NEKO_BCKND_DEVICE
   use no_slip, only : no_slip_t
   use num_types, only : i8, rp, xp
@@ -409,12 +409,12 @@ contains
   subroutine pnpn2_velocity_bc_factory(object, json, coef)
     class(bc_t), pointer, intent(inout) :: object
     type(json_file), intent(inout) :: json
-    type(coef_t), target, intent(in) :: coef
+    type(coef_t), target, intent(inout) :: coef
     character(len=:), allocatable :: type
     character(len=:), allocatable :: default_name
     integer, allocatable :: zone_indices(:)
     character(len=64) :: buf
-    integer :: i
+    integer :: i, j, k
 
     if (associated(object)) then
       call object%free()
@@ -450,6 +450,20 @@ contains
     object%zone_indices = zone_indices
     call object%finalize()
 
+    ! Match Nek's get_fast_bc code for velocity Dirichlet boundaries.  These
+    ! are pressure-Neumann faces in the HSMG/FDM hierarchy, represented by
+    ! facet type 2.  Leaving the original negative zone label here makes the
+    ! FDM setup interpret walls and inlets as pressure-Dirichlet boundaries.
+    do i = 1, size(zone_indices)
+      do j = 1, coef%msh%nelv
+        do k = 1, 2 * coef%msh%gdim
+          if (coef%msh%facet_type(k,j) .eq. -zone_indices(i)) then
+            coef%msh%facet_type(k,j) = 2
+          end if
+        end do
+      end do
+    end do
+
     if (allocated(default_name)) then
       deallocate(default_name)
     end if
@@ -465,12 +479,12 @@ contains
   subroutine pnpn2_pressure_bc_factory(object, json, coef)
     class(bc_t), pointer, intent(inout) :: object
     type(json_file), intent(inout) :: json
-    type(coef_t), target, intent(in) :: coef
+    type(coef_t), target, intent(inout) :: coef
     character(len=:), allocatable :: type
     character(len=:), allocatable :: default_name
     integer, allocatable :: zone_indices(:)
     character(len=64) :: buf
-    integer :: i
+    integer :: i, j, k
 
     if (associated(object)) then
       call object%free()
@@ -503,6 +517,18 @@ contains
     call json_get_or_default(json, 'name', object%name, default_name)
     object%zone_indices = zone_indices
     call object%finalize()
+
+    ! Nek marks outflow as pressure Dirichlet/no extension (facet type 1) for
+    ! every level of the HSMG/FDM pressure preconditioner.
+    do i = 1, size(zone_indices)
+      do j = 1, coef%msh%nelv
+        do k = 1, 2 * coef%msh%gdim
+          if (coef%msh%facet_type(k,j) .eq. -zone_indices(i)) then
+            coef%msh%facet_type(k,j) = 1
+          end if
+        end do
+      end do
+    end do
 
     if (allocated(default_name)) then
       deallocate(default_name)
@@ -748,7 +774,20 @@ contains
    ksp_results%converged = converged .and. (rnorm .le. tol_goal)
   end function pnpn2_prs_gmres_solve
 
-  !> Initialize lower-order GL pressure coefficients directly on `Y_h`.
+  !> Apply Nek `MAP12` interpolation from \f$ X_h \f$ to \f$ Y_h \f$.
+  subroutine pnpn2_map12(y, x, Xh, Yh, nelv, prs_interp)
+    type(space_t), intent(in) :: Xh
+    type(space_t), intent(in) :: Yh
+    integer, intent(in) :: nelv
+    type(interpolator_t), intent(in) :: prs_interp
+    real(kind=rp), intent(in) :: x(Xh%lx, Xh%ly, Xh%lz, nelv)
+    real(kind=rp), intent(inout) :: y(Yh%lx, Yh%ly, Yh%lz, nelv)
+
+    call tnsr3d(y, Yh%lx, x, Xh%lx, prs_interp%Xh_to_Yh, &
+         prs_interp%Xh_to_YhT, prs_interp%Xh_to_YhT, nelv)
+  end subroutine pnpn2_map12
+
+  !> Initialize lower-order GL pressure coefficients using Nek `geom2` maps.
   subroutine pnpn2_pressure_coef_init(c, msh, Yh, dm, c_Xh, prs_interp)
     type(coef_t), intent(inout), target :: c
     type(mesh_t), target, intent(inout) :: msh
@@ -756,7 +795,7 @@ contains
     type(dofmap_t), target, intent(inout) :: dm
     type(coef_t), intent(in) :: c_Xh
     type(interpolator_t), intent(inout) :: prs_interp
-    integer :: e, i, lxy, lyz, lxyz, ntot
+    integer :: e, i, lxyz, ntot
 
     call c%free()
 
@@ -800,73 +839,32 @@ contains
     c%Blag => c%B
     c%Blaglag => c%B
 
-    lxy = Yh%lx * Yh%ly
-    lyz = Yh%ly * Yh%lz
     lxyz = Yh%lxyz
     ntot = dm%size()
 
-    do e = 1, msh%nelv
-      call mxm(Yh%dx, Yh%lx, dm%x(1,1,1,e), Yh%lx, c%dxdr(1,1,1,e), lyz)
-      call mxm(Yh%dx, Yh%lx, dm%y(1,1,1,e), Yh%lx, c%dydr(1,1,1,e), lyz)
-      call mxm(Yh%dx, Yh%lx, dm%z(1,1,1,e), Yh%lx, c%dzdr(1,1,1,e), lyz)
-
-      do i = 1, Yh%lz
-        call mxm(dm%x(1,1,i,e), Yh%lx, Yh%dyt, Yh%ly, c%dxds(1,1,i,e), Yh%ly)
-        call mxm(dm%y(1,1,i,e), Yh%lx, Yh%dyt, Yh%ly, c%dyds(1,1,i,e), Yh%ly)
-        call mxm(dm%z(1,1,i,e), Yh%lx, Yh%dyt, Yh%ly, c%dzds(1,1,i,e), Yh%ly)
-      end do
-
-      if (msh%gdim .eq. 3) then
-        call mxm(dm%x(1,1,1,e), lxy, Yh%dzt, Yh%lz, c%dxdt(1,1,1,e), Yh%lz)
-        call mxm(dm%y(1,1,1,e), lxy, Yh%dzt, Yh%lz, c%dydt(1,1,1,e), Yh%lz)
-        call mxm(dm%z(1,1,1,e), lxy, Yh%dzt, Yh%lz, c%dzdt(1,1,1,e), Yh%lz)
-      else
-        c%dxdt(:,:,:,e) = 0.0_rp
-        c%dydt(:,:,:,e) = 0.0_rp
-        c%dzdt(:,:,:,e) = 1.0_rp
-      end if
-    end do
+    ! Nek's geom2 maps the mesh-1 metric data to the pressure points instead of
+    ! differentiating an independently constructed lower-order geometry.
+    call pnpn2_map12(c%dxdr, c_Xh%dxdr, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dydr, c_Xh%dydr, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dzdr, c_Xh%dzdr, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dxds, c_Xh%dxds, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dyds, c_Xh%dyds, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dzds, c_Xh%dzds, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dxdt, c_Xh%dxdt, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dydt, c_Xh%dydt, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dzdt, c_Xh%dzdt, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%drdx, c_Xh%drdx, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%drdy, c_Xh%drdy, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%drdz, c_Xh%drdz, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dsdx, c_Xh%dsdx, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dsdy, c_Xh%dsdy, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dsdz, c_Xh%dsdz, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dtdx, c_Xh%dtdx, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dtdy, c_Xh%dtdy, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%dtdz, c_Xh%dtdz, c_Xh%Xh, Yh, msh%nelv, prs_interp)
+    call pnpn2_map12(c%jac, c_Xh%jac, c_Xh%Xh, Yh, msh%nelv, prs_interp)
 
     do i = 1, ntot
-      if (msh%gdim .eq. 2) then
-        c%jac(i,1,1,1) = c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) - &
-             c%dxds(i,1,1,1) * c%dydr(i,1,1,1)
-        c%drdx(i,1,1,1) = c%dyds(i,1,1,1)
-        c%drdy(i,1,1,1) = -c%dxds(i,1,1,1)
-        c%dsdx(i,1,1,1) = -c%dydr(i,1,1,1)
-        c%dsdy(i,1,1,1) = c%dxdr(i,1,1,1)
-        c%drdz(i,1,1,1) = 0.0_rp
-        c%dsdz(i,1,1,1) = 0.0_rp
-        c%dtdx(i,1,1,1) = 0.0_rp
-        c%dtdy(i,1,1,1) = 0.0_rp
-        c%dtdz(i,1,1,1) = 1.0_rp
-      else
-        c%jac(i,1,1,1) = &
-             c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) * c%dzdt(i,1,1,1) + &
-             c%dxdt(i,1,1,1) * c%dydr(i,1,1,1) * c%dzds(i,1,1,1) + &
-             c%dxds(i,1,1,1) * c%dydt(i,1,1,1) * c%dzdr(i,1,1,1) - &
-             c%dxdr(i,1,1,1) * c%dydt(i,1,1,1) * c%dzds(i,1,1,1) - &
-             c%dxds(i,1,1,1) * c%dydr(i,1,1,1) * c%dzdt(i,1,1,1) - &
-             c%dxdt(i,1,1,1) * c%dyds(i,1,1,1) * c%dzdr(i,1,1,1)
-        c%drdx(i,1,1,1) = c%dyds(i,1,1,1) * c%dzdt(i,1,1,1) - &
-             c%dydt(i,1,1,1) * c%dzds(i,1,1,1)
-        c%drdy(i,1,1,1) = c%dxdt(i,1,1,1) * c%dzds(i,1,1,1) - &
-             c%dxds(i,1,1,1) * c%dzdt(i,1,1,1)
-        c%drdz(i,1,1,1) = c%dxds(i,1,1,1) * c%dydt(i,1,1,1) - &
-             c%dxdt(i,1,1,1) * c%dyds(i,1,1,1)
-        c%dsdx(i,1,1,1) = c%dydt(i,1,1,1) * c%dzdr(i,1,1,1) - &
-             c%dydr(i,1,1,1) * c%dzdt(i,1,1,1)
-        c%dsdy(i,1,1,1) = c%dxdr(i,1,1,1) * c%dzdt(i,1,1,1) - &
-             c%dxdt(i,1,1,1) * c%dzdr(i,1,1,1)
-        c%dsdz(i,1,1,1) = c%dxdt(i,1,1,1) * c%dydr(i,1,1,1) - &
-             c%dxdr(i,1,1,1) * c%dydt(i,1,1,1)
-        c%dtdx(i,1,1,1) = c%dydr(i,1,1,1) * c%dzds(i,1,1,1) - &
-             c%dyds(i,1,1,1) * c%dzdr(i,1,1,1)
-        c%dtdy(i,1,1,1) = c%dxds(i,1,1,1) * c%dzdr(i,1,1,1) - &
-             c%dxdr(i,1,1,1) * c%dzds(i,1,1,1)
-        c%dtdz(i,1,1,1) = c%dxdr(i,1,1,1) * c%dyds(i,1,1,1) - &
-             c%dxds(i,1,1,1) * c%dydr(i,1,1,1)
-      end if
       c%jacinv(i,1,1,1) = 1.0_rp / c%jac(i,1,1,1)
       c%G11(i,1,1,1) = (c%drdx(i,1,1,1)**2 + c%drdy(i,1,1,1)**2 + &
            c%drdz(i,1,1,1)**2) * c%jacinv(i,1,1,1)
@@ -944,6 +942,12 @@ contains
     call this%dm_Yh%init(msh, this%Yh)
     call this%gs_prs%init_noop(this%dm_Yh)
     call this%prs_interp%init(this%Xh, this%Yh)
+    call pnpn2_map12(this%dm_Yh%x, this%dm_Xh%x, this%Xh, this%Yh, &
+         msh%nelv, this%prs_interp)
+    call pnpn2_map12(this%dm_Yh%y, this%dm_Xh%y, this%Xh, this%Yh, &
+         msh%nelv, this%prs_interp)
+    call pnpn2_map12(this%dm_Yh%z, this%dm_Xh%z, this%Xh, this%Yh, &
+         msh%nelv, this%prs_interp)
     call pnpn2_pressure_coef_init(this%c_Yh, msh, this%Yh, this%dm_Yh, &
          this%c_Xh, this%prs_interp)
 
@@ -958,7 +962,6 @@ contains
     allocate(pnpn2_prs_ax_t::this%Ax_prs)
     call this%mixed_ops%init(this%Xh, this%Yh, this%dm_Xh, this%dm_Yh, &
          this%c_Xh, this%c_Yh)
-    call pnpn2_prs_ax_init(this%mixed_ops)
 
     call rhs_maker_bdf_fctry(this%makebdf)
 
@@ -975,6 +978,8 @@ contains
     call this%dw%init(this%dm_Xh, 'dw')
 
     call this%setup_bcs(user, params)
+    call pnpn2_prs_ax_init(this%mixed_ops, this%bclst_du, this%bclst_dv, &
+         this%bclst_dw)
 
     call neko_log%section('Pressure solver')
     call json_get_or_lookup_or_default(params, &
@@ -1169,10 +1174,9 @@ contains
       end do
     else
       do concurrent (i = 1:n_y)
-        this%p_ext%x(i,1,1,1) = this%ext_bdf%advection_coeffs%x(1) * &
-             this%plag%lf(1)%x(i,1,1,1) + &
-             this%ext_bdf%advection_coeffs%x(2) * this%plag%lf(2)%x(i,1,1,1) + &
-             this%ext_bdf%advection_coeffs%x(3) * this%plag%lf(3)%x(i,1,1,1)
+        this%p_ext%x(i,1,1,1) = this%plag%lf(1)%x(i,1,1,1) + &
+             time%dtlag(1) / time%dtlag(2) * &
+             (this%plag%lf(1)%x(i,1,1,1) - this%plag%lf(2)%x(i,1,1,1))
       end do
     end if
 
@@ -1295,12 +1299,18 @@ contains
     end if
 
     call this%mixed_ops%opgradt(gx%x, gy%x, gz%x, this%dp%x)
+    call this%bclst_du%apply_scalar(gx%x, n_x, time)
+    call this%bclst_dv%apply_scalar(gy%x, n_x, time)
+    call this%bclst_dw%apply_scalar(gz%x, n_x, time)
     call this%gs_Xh%op(gx, GS_OP_ADD)
     call this%gs_Xh%op(gy, GS_OP_ADD)
     call this%gs_Xh%op(gz, GS_OP_ADD)
     call col2(gx%x, this%c_Xh%Binv, n_x)
     call col2(gy%x, this%c_Xh%Binv, n_x)
     call col2(gz%x, this%c_Xh%Binv, n_x)
+    call cmult(gx%x, 1.0_rp / rho_val, n_x)
+    call cmult(gy%x, 1.0_rp / rho_val, n_x)
+    call cmult(gz%x, 1.0_rp / rho_val, n_x)
     call opadd2cm(this%u%x, this%v%x, this%w%x, gx%x, gy%x, gz%x, dt / a0, &
          n_x, this%msh%gdim)
 
@@ -1326,7 +1336,8 @@ contains
 
     call this%sync_p_from_public()
     call this%plag%set(this%p_Yh)
-    call pnpn2_prs_ax_init(this%mixed_ops)
+    call pnpn2_prs_ax_init(this%mixed_ops, this%bclst_du, this%bclst_dv, &
+         this%bclst_dw)
   end subroutine fluid_pnpn2_restart
 
   !> Set up the supported boundary-condition configuration for milestone 1.

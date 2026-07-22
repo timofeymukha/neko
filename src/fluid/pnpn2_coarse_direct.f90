@@ -40,10 +40,12 @@
 !! follow the same local-user-space setup structure as Nek5000 `crs_xxt.c`.
 module pnpn2_coarse_direct
   use ax_product, only : ax_t, ax_helm_factory
+  use bc_list, only : bc_list_t
   use coefs, only : coef_t
   use comm, only : pe_rank, pe_size
   use dofmap, only : dofmap_t
   use field, only : field_t
+  use gather_scatter, only : gs_t, GS_OP_MUL
   use mpi_f08, only : MPI_Datatype
   use num_types, only : i8, rp
   use pnpn2_coarse_xxt, only : pnpn2_coarse_xxt_t
@@ -122,11 +124,14 @@ module pnpn2_coarse_direct
 contains
 
   !> Assemble the sparse coarse operator and the XXT-style condensed solve.
-  subroutine pnpn2_coarse_direct_init(this, coef_fine, dm_fine, dm_crs, null_space)
+  subroutine pnpn2_coarse_direct_init(this, coef_fine, dm_fine, dm_crs, &
+       gs_crs, bclst_crs, null_space)
     class(pnpn2_coarse_direct_t), intent(inout) :: this
     type(coef_t), intent(inout), target :: coef_fine
     type(dofmap_t), intent(inout), target :: dm_fine
     type(dofmap_t), intent(inout), target :: dm_crs
+    type(gs_t), intent(inout) :: gs_crs
+    type(bc_list_t), intent(inout) :: bclst_crs
     logical, intent(in) :: null_space
     integer :: i, e, iloc, jloc, ncoef
     integer :: nelv, local_nnz
@@ -134,6 +139,7 @@ contains
     integer, allocatable :: local_rows(:), local_cols(:)
     integer(kind=i8), allocatable :: local_ids(:), local_keys(:)
     real(kind=rp), allocatable :: local_vals(:)
+    real(kind=rp), allocatable :: mask(:)
     real(kind=rp), allocatable :: h1_save(:), h2_save(:)
     real(kind=rp) :: val
     logical :: ifh2_save
@@ -151,6 +157,18 @@ contains
     allocate(local_ids(this%n_local))
     do i = 1, this%n_local
       local_ids(i) = dm_crs%dof(i,1,1,1)
+    end do
+
+    ! Match Nek's set_jl_crs_mask: pressure-Dirichlet nodes have global id
+    ! zero and are therefore omitted entirely from the XXT factorization.
+    ! The multiplicative gather-scatter propagates a boundary zero to every
+    ! element/rank copy of the same coarse-grid node.
+    allocate(mask(this%n_local))
+    mask = 1.0_rp
+    call bclst_crs%apply_scalar(mask, this%n_local)
+    call gs_crs%op(mask, this%n_local, GS_OP_MUL)
+    do i = 1, this%n_local
+      if (mask(i) .lt. 0.5_rp) local_ids(i) = 0_i8
     end do
 
     allocate(this%basis(this%lx_fine, this%lx_fine, this%lz_fine, this%nloc_crs))
@@ -212,7 +230,7 @@ contains
     call this%xxt%setup(local_ids, this%nnz, local_rows, local_cols, local_vals)
     this%initialized = .true.
 
-    deallocate(local_ids, local_keys, local_vals, local_rows, local_cols)
+    deallocate(local_ids, local_keys, local_vals, local_rows, local_cols, mask)
   end subroutine pnpn2_coarse_direct_init
 
   !> Release all coarse-grid storage.

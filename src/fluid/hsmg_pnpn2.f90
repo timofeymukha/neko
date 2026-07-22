@@ -81,6 +81,7 @@ module hsmg_pnpn2
   use schwarz, only : schwarz_t
   use space, only : GLL, space_t
   use sx_jacobi, only : sx_jacobi_t
+  use tensor, only : tnsr3d
   use tree_amg_multigrid, only : tamg_solver_t
   use utils, only : neko_error
   use zero_dirichlet, only : zero_dirichlet_t
@@ -130,7 +131,7 @@ module hsmg_pnpn2
     !> Schwarz/FDM smoother on the middle level.
     type(schwarz_t) :: schwarz_mg
     !> Interpolation operators for the downward and upward legs.
-    type(interpolator_t) :: interp_top_mg, interp_mg_crs
+    type(interpolator_t) :: interp_top_mg, interp_mg_crs, interp_top_crs
     !> Fine-grid work vectors on the local pressure grid.
     type(field_t) :: r_Yh, w_Yh
     !> Fine-grid work vectors on the embedded `X_h` grid.
@@ -158,6 +159,8 @@ module hsmg_pnpn2
     logical :: crs_solver_initialized = .false.
     !> True when the dedicated Pn/Pn-2 coarse solver path is active.
     logical :: use_direct_coarse = .true.
+    !> Use Nek's two-level hierarchy for a four-point velocity grid.
+    logical :: two_level = .false.
    contains
      !> Initialise all levels of the pressure-space V-cycle.
      procedure, pass(this) :: init => hsmg_pnpn2_init
@@ -229,6 +232,7 @@ contains
 
     lx_crs = 2
     lx_mg = hsmg_pnpn2_mid_lx(c_Xh%Xh%lx)
+    this%two_level = (c_Xh%Xh%lx .eq. 4)
     coarse_null_space = .true.
     call json_get_or_default(params, 'coarse_grid.solver', crs_solver_type, 'direct')
     call json_get_or_default(params, 'coarse_grid.preconditioner', crs_pc_type, &
@@ -267,16 +271,17 @@ contains
     call this%r_Yh%init(dm_Yh, 'hsmg_pnpn2_r_Yh')
     call this%w_Yh%init(dm_Yh, 'hsmg_pnpn2_w_Yh')
 
-    ! Middle H1 level.  This is the first true multigrid level below the top
-    ! embedded `X_h` Schwarz solve.
-    call this%Xh_mg%init(GLL, lx_mg, lx_mg, lx_mg)
-    call this%dm_mg%init(c_Xh%msh, this%Xh_mg)
-    call this%gs_mg%init(this%dm_mg)
-    call this%c_mg%init(this%gs_mg)
-    call this%set_h1_coeffs(this%c_mg)
-    call this%r_mg%init(this%dm_mg, 'hsmg_pnpn2_r_mg')
-    call this%e_mg%init(this%dm_mg, 'hsmg_pnpn2_e_mg')
-    call this%w_mg%init(this%dm_mg, 'hsmg_pnpn2_w_mg')
+    ! Middle H1 level. Nek omits it when the velocity grid has four points.
+    if (.not. this%two_level) then
+      call this%Xh_mg%init(GLL, lx_mg, lx_mg, lx_mg)
+      call this%dm_mg%init(c_Xh%msh, this%Xh_mg)
+      call this%gs_mg%init(this%dm_mg)
+      call this%c_mg%init(this%gs_mg)
+      call this%set_h1_coeffs(this%c_mg)
+      call this%r_mg%init(this%dm_mg, 'hsmg_pnpn2_r_mg')
+      call this%e_mg%init(this%dm_mg, 'hsmg_pnpn2_e_mg')
+      call this%w_mg%init(this%dm_mg, 'hsmg_pnpn2_w_mg')
+    end if
 
     ! Coarse H1 level.  This level is not solved iteratively; instead it is
     ! handed to the explicit condensed coarse solver.
@@ -291,20 +296,24 @@ contains
     ! Transfer the strong pressure facets to the lower H1 levels.  The middle
     ! and coarse levels use zero Dirichlet masks rather than the original fluid
     ! boundary objects.
-    call this%bc_mg%init_base(this%c_mg)
+    if (.not. this%two_level) then
+      call this%bc_mg%init_base(this%c_mg)
+    end if
     call this%bc_crs%init_base(this%c_crs)
     do i = 1, bcs_prs_Xh%size()
       if (bcs_prs_Xh%strong(i)) then
         bc_i => bcs_prs_Xh%get(i)
-        call this%bc_mg%mark_facets(bc_i%marked_facet)
+        if (.not. this%two_level) then
+          call this%bc_mg%mark_facets(bc_i%marked_facet)
+        end if
         call this%bc_crs%mark_facets(bc_i%marked_facet)
       end if
     end do
-    call this%bc_mg%finalize()
+    if (.not. this%two_level) then
+      call this%bc_mg%finalize()
+    end if
     call this%bc_crs%finalize()
-    call this%bclst_mg%init()
     call this%bclst_crs%init()
-    call this%bclst_mg%append(this%bc_mg)
     call this%bclst_crs%append(this%bc_crs)
 
     ! Finish the lower-level HSMG objects:
@@ -312,12 +321,19 @@ contains
     ! - top-to-middle and middle-to-coarse interpolation operators,
     ! - coarse solver, either the dedicated Pn/Pn-2 CRS-like path or the
     !   alternative reusable HSMG path.
-    call this%schwarz_mg%init(this%Xh_mg, this%dm_mg, this%gs_mg, &
-         this%bclst_mg, c_Xh%msh)
-    call this%interp_top_mg%init(Yh, this%Xh_mg)
-    call this%interp_mg_crs%init(this%Xh_mg, this%Xh_crs)
+    if (this%two_level) then
+      call this%interp_top_crs%init(Yh, this%Xh_crs)
+    else
+      call this%bclst_mg%init()
+      call this%bclst_mg%append(this%bc_mg)
+      call this%schwarz_mg%init(this%Xh_mg, this%dm_mg, this%gs_mg, &
+           this%bclst_mg, c_Xh%msh, this%top_fdm_Xh)
+      call this%interp_top_mg%init(Yh, this%Xh_mg)
+      call this%interp_mg_crs%init(this%Xh_mg, this%Xh_crs)
+    end if
     if (this%use_direct_coarse) then
-      call this%crs_solver%init(this%c_Xh, this%dm_Xh, this%dm_crs, coarse_null_space)
+      call this%crs_solver%init(this%c_Xh, this%dm_Xh, this%dm_crs, &
+           this%gs_crs, this%bclst_crs, coarse_null_space)
     else if (trim(crs_solver_type) .eq. 'tamg') then
       call ax_helm_factory(this%ax, full_formulation = .false.)
       allocate(this%amg_solver)
@@ -370,6 +386,7 @@ contains
     call this%schwarz_mg%free()
     call this%interp_top_mg%free()
     call this%interp_mg_crs%free()
+    call this%interp_top_crs%free()
     if (this%crs_solver_initialized) then
       if (this%use_direct_coarse) then
         call this%crs_solver%free()
@@ -418,6 +435,7 @@ contains
     nullify(this%dm_Yh)
     nullify(this%dm_Xh)
     nullify(this%gs_Xh)
+    this%two_level = .false.
   end subroutine hsmg_pnpn2_free
 
   !> Apply one pressure-space HSMG V-cycle.
@@ -514,26 +532,26 @@ contains
     call copy(this%r_Yh%x, r, n)
 
     ! Step 3:
-    ! Restrict the original local pressure residual to the middle H1 level and
-    ! perform the middle-level gather-scatter.
+    ! Restrict the original local pressure residual. Nek uses a direct top to
+    ! coarse transfer when lx1=4 and the three-level hierarchy otherwise.
     call profiler_start_region('HSMG_pnpn2_coarse_grid')
-    call this%interp_top_mg%map(this%r_mg%x, this%r_Yh%x, nelv, this%Xh_mg)
-    call this%gs_mg%op(this%r_mg%x, this%dm_mg%size(), GS_OP_ADD)
+    if (this%two_level) then
+      call this%interp_top_crs%map(this%r_crs%x, this%r_Yh%x, nelv, this%Xh_crs)
+    else
+      call this%interp_top_mg%map(this%r_mg%x, this%r_Yh%x, nelv, this%Xh_mg)
+      call this%gs_mg%op(this%r_mg%x, this%dm_mg%size(), GS_OP_ADD)
 
-    ! Step 4:
-    ! Apply the middle-level Schwarz/FDM smoother.
-    call this%schwarz_mg%compute(this%e_mg%x, this%r_mg%x)
+      ! Apply the middle-level Schwarz/FDM smoother.
+      call this%schwarz_mg%compute(this%e_mg%x, this%r_mg%x)
 
-    ! Step 5:
-    ! Apply Nek-style restriction weights only on the level boundary before the
-    ! residual is transferred to the coarse grid.
-    call this%weight_restriction_boundary(this%r_mg%x, this%c_mg)
+      ! Apply Nek-style restriction weights only on the level boundary before
+      ! the residual is transferred to the coarse grid.
+      call this%weight_restriction_boundary(this%r_mg%x, this%c_mg)
 
-    ! Step 6:
-    ! Restrict to the coarse grid.  The dedicated coarse solver works on the
-    ! unique coarse dofs internally, so this path does not do an additional
-    ! coarse-grid gather-scatter beforehand.
-    call this%interp_mg_crs%map(this%r_crs%x, this%r_mg%x, nelv, this%Xh_crs)
+      ! The dedicated coarse solver works on the unique coarse dofs internally,
+      ! so this path does not do an additional coarse-grid gather-scatter.
+      call this%interp_mg_crs%map(this%r_crs%x, this%r_mg%x, nelv, this%Xh_crs)
+    end if
     if (this%use_direct_coarse) then
       call this%weight_coarse_mask(this%r_crs%x, this%c_crs)
       call profiler_start_region('HSMG_pnpn2_coarse_solve')
@@ -556,19 +574,26 @@ contains
       call this%bclst_crs%apply_scalar(this%e_crs%x, this%dm_crs%size())
     end if
 
-    ! Step 7:
-    ! Prolong the coarse correction back to the middle level and accumulate it
-    ! with the middle Schwarz contribution.
-    call this%interp_mg_crs%map(this%w_mg%x, this%e_crs%x, nelv, this%Xh_mg)
-    call add2(this%e_mg%x, this%w_mg%x, this%dm_mg%size())
-
-    ! Step 8:
-    ! Prolong the lower-level correction to the local pressure grid.  The final
-    ! result is the sum of:
-    ! - the top `X_h` Schwarz correction extracted back to `Y_h`, and
-    ! - the lower-level correction prolongated from the middle H1 level.
+    ! Prolong the lower-level correction to the local pressure grid. The
+    ! four-point special case comes directly from the coarse level; all other
+    ! orders accumulate it with the middle Schwarz contribution first.
     call profiler_start_region('HSMG_pnpn2_prolongation')
-    call this%interp_top_mg%map(this%w_Yh%x, this%e_mg%x, nelv, this%Yh)
+    if (this%two_level) then
+      call this%interp_top_crs%map(this%w_Yh%x, this%e_crs%x, nelv, this%Yh)
+    else
+      call this%interp_mg_crs%map(this%w_mg%x, this%e_crs%x, nelv, this%Xh_mg)
+      call add2(this%e_mg%x, this%w_mg%x, this%dm_mg%size())
+      ! The pressure GL and middle GLL spaces have the same point count for
+      ! Nek's three-level hierarchy. `interpolator_t%map` distinguishes its
+      ! direction through `space_t` equality, which compares point counts only,
+      ! and would therefore select the transpose (restriction) in both
+      ! directions. Apply the stored middle-GLL to pressure-GL interpolation
+      ! explicitly for the upward leg.
+      call tnsr3d(this%w_Yh%x, this%Yh%lx, this%e_mg%x, this%Xh_mg%lx, &
+           this%interp_top_mg%Yh_to_Xh, &
+           this%interp_top_mg%Yh_to_XhT, &
+           this%interp_top_mg%Yh_to_XhT, nelv)
+    end if
     do e = 1, nelv
       do k = 1, nz
         iz = k
@@ -600,7 +625,9 @@ contains
   subroutine hsmg_pnpn2_update(this)
     class(hsmg_pnpn2_t), intent(inout) :: this
  
-    call this%set_h1_coeffs(this%c_mg)
+    if (.not. this%two_level) then
+      call this%set_h1_coeffs(this%c_mg)
+    end if
     call this%set_h1_coeffs(this%c_crs)
   end subroutine hsmg_pnpn2_update
 

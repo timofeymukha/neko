@@ -110,13 +110,14 @@ module schwarz
 
 contains
 
-  subroutine schwarz_init(this, Xh, dof, gs_h, bclst, msh)
+  subroutine schwarz_init(this, Xh, dof, gs_h, bclst, msh, length_fdm)
     class(schwarz_t), target, intent(inout) :: this
     type(space_t), target, intent(inout) :: Xh
     type(dofmap_t), target, intent(in) :: dof
     type(gs_t), target, intent(inout) :: gs_h
     type(mesh_t), target, intent(inout) :: msh
     type(bc_list_t), target, intent(inout) :: bclst
+    type(fdm_t), intent(in), optional :: length_fdm
     integer :: nthrds
 
     call this%free()
@@ -129,7 +130,7 @@ contains
     allocate(this%work2(this%dm_schwarz%size()))
     allocate(this%wt(Xh%lx, Xh%lx, 4, msh%gdim, msh%nelv))
 
-    call this%fdm%init(Xh, dof, gs_h)
+    call this%fdm%init(Xh, dof, gs_h, length_fdm)
 
 
     this%msh => msh

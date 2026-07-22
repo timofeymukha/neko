@@ -703,7 +703,11 @@ contains
   !! 1. collapse duplicate user ids to unique local condensed ids;
   !! 2. gather owner/count information across ranks;
   !! 3. assign each id to a separator level;
-  !! 4. sort condensed dofs by `(level, count, id)` and build `perm_u2c`.
+  !! 4. sort condensed dofs by `(level, id)` and build `perm_u2c`.
+  !!
+  !! The ID ordering within each separator level is significant: the later
+  !! separator-ID merge is ordered by global ID. Nek's stable level sort starts
+  !! from an ID-ordered list and therefore preserves exactly this ordering.
   subroutine xxt_discover_dofs(this, id, dof)
     class(pnpn2_coarse_xxt_t), intent(inout) :: this
     integer(kind=i8), intent(in) :: id(:)
@@ -1668,11 +1672,14 @@ contains
   end subroutine permute_dofs
 
   !> Strict weak ordering for separator dof sorting.
+  !!
+  !! Do not include the share count here. Nek sorts by separator level while
+  !! preserving the pre-existing global-ID order. Including the count breaks
+  !! the ordered separator-ID lookup in `xxt_find_perm_x2c`.
   logical function dof_less(a, b) result(is_less)
     type(xxt_dof_t), intent(in) :: a, b
     is_less = (a%level .lt. b%level) .or. &
-         (a%level .eq. b%level .and. a%count .lt. b%count) .or. &
-         (a%level .eq. b%level .and. a%count .eq. b%count .and. a%id .lt. b%id)
+         (a%level .eq. b%level .and. a%id .lt. b%id)
   end function dof_less
 
   !> Integer floor(log2(v)) for strictly positive integers.

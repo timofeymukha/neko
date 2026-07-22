@@ -109,11 +109,12 @@ module fdm
 
 contains
 
-  subroutine fdm_init(this, Xh, dof, gs_h)
+  subroutine fdm_init(this, Xh, dof, gs_h, length_fdm)
     class(fdm_t), intent(inout) :: this
     type(space_t), target, intent(inout) :: Xh
     type(dofmap_t), target, intent(in) :: dof
     type(gs_t), target, intent(inout) :: gs_h
+    type(fdm_t), intent(in), optional :: length_fdm
     !We only really use ah, bh
     real(kind=rp), dimension((Xh%lx)**2) :: ah, bh, ch, dh, zh
     real(kind=rp), dimension((Xh%lx)**2) :: dph, jph, bgl, zglhat, dgl, jgl, wh
@@ -147,7 +148,20 @@ contains
     this%gs_h => gs_h
     this%msh => dof%msh
 
-    call swap_lengths(this, dof%x, dof%y, dof%z, dof%msh%nelv, dof%msh%gdim)
+    if (present(length_fdm)) then
+       this%len_lr = length_fdm%len_lr
+       this%len_ls = length_fdm%len_ls
+       this%len_lt = length_fdm%len_lt
+       this%len_mr = length_fdm%len_mr
+       this%len_ms = length_fdm%len_ms
+       this%len_mt = length_fdm%len_mt
+       this%len_rr = length_fdm%len_rr
+       this%len_rs = length_fdm%len_rs
+       this%len_rt = length_fdm%len_rt
+    else
+       call swap_lengths(this, dof%x, dof%y, dof%z, dof%msh%nelv, &
+            dof%msh%gdim)
+    end if
 
     call fdm_setup_fast(this, ah, bh, nl, n)
 

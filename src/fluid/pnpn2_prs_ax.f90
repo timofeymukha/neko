@@ -33,10 +33,11 @@
 !> Implements the PnPn-2 pressure operator on the lower-order pressure space.
 module pnpn2_prs_ax
   use ax_product, only : ax_t
+  use bc_list, only : bc_list_t
   use coefs, only : coef_t
   use field, only : field_t
   use gs_ops, only : GS_OP_ADD
-  use math, only : col2
+  use math, only : cmult, col2
   use mesh, only : mesh_t
   use neko_config, only : NEKO_BCKND_DEVICE
   use num_types, only : rp
@@ -54,24 +55,36 @@ module pnpn2_prs_ax
   end type pnpn2_prs_ax_t
 
   type(pnpn2_mixed_ops_t), pointer, save :: mixed_ops => null()
+  type(bc_list_t), pointer, save :: bclst_x => null()
+  type(bc_list_t), pointer, save :: bclst_y => null()
+  type(bc_list_t), pointer, save :: bclst_z => null()
 
   public :: pnpn2_prs_ax_init, pnpn2_prs_ax_clear
 
 contains
 
-  !> Bind the PnPn-2 pressure operator to the active unequal-order hierarchy.
-  subroutine pnpn2_prs_ax_init(mixed_space_ops)
+  !> Bind the pressure operator to the active hierarchy and velocity masks.
+  subroutine pnpn2_prs_ax_init(mixed_space_ops, bclst_du, bclst_dv, bclst_dw)
     type(pnpn2_mixed_ops_t), target, intent(inout) :: mixed_space_ops
+    type(bc_list_t), target, intent(inout) :: bclst_du
+    type(bc_list_t), target, intent(inout) :: bclst_dv
+    type(bc_list_t), target, intent(inout) :: bclst_dw
 
     mixed_ops => mixed_space_ops
+    bclst_x => bclst_du
+    bclst_y => bclst_dv
+    bclst_z => bclst_dw
   end subroutine pnpn2_prs_ax_init
 
   !> Clear the module state used by the PnPn-2 pressure operator.
   subroutine pnpn2_prs_ax_clear()
     nullify(mixed_ops)
+    nullify(bclst_x)
+    nullify(bclst_y)
+    nullify(bclst_z)
   end subroutine pnpn2_prs_ax_clear
 
-  !> Apply the PnPn-2 projection operator \f$ D B^{-1} G \f$ on \f$ Y_h \f$.
+  !> Apply \f$ D (\rho B)^{-1} G \f$ on \f$ Y_h \f$.
   subroutine pnpn2_prs_ax_compute(w, u, coef, msh, Xh)
     type(mesh_t), intent(in) :: msh
     type(space_t), intent(in) :: Xh
@@ -81,22 +94,31 @@ contains
     type(field_t), pointer :: gx, gy, gz
     integer :: scratch_ids(3)
     integer :: n
+    real(kind=rp) :: rho_inv
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
       call neko_error('pnpn2_prs_ax_t is currently CPU-only.')
     end if
 
-    if (.not. associated(mixed_ops)) then
+    if (.not. associated(mixed_ops) .or. .not. associated(bclst_x) .or. &
+         .not. associated(bclst_y) .or. .not. associated(bclst_z)) then
       call neko_error('PnPn-2 pressure operator used before initialization.')
     end if
 
     n = mixed_ops%coef_Xh%dof%size()
+    rho_inv = coef%h1(1,1,1,1)
 
     call neko_scratch_registry%request_field(gx, scratch_ids(1), .false.)
     call neko_scratch_registry%request_field(gy, scratch_ids(2), .false.)
     call neko_scratch_registry%request_field(gz, scratch_ids(3), .false.)
 
     call mixed_ops%opgradt(gx%x, gy%x, gz%x, u)
+
+    ! Nek's opbinv first restricts the transpose gradient to the homogeneous
+    ! velocity-increment space, then assembles it.
+    call bclst_x%apply_scalar(gx%x, n)
+    call bclst_y%apply_scalar(gy%x, n)
+    call bclst_z%apply_scalar(gz%x, n)
 
     call mixed_ops%coef_Xh%gs_h%op(gx, GS_OP_ADD)
     call mixed_ops%coef_Xh%gs_h%op(gy, GS_OP_ADD)
@@ -105,6 +127,9 @@ contains
     call col2(gx%x, mixed_ops%coef_Xh%Binv, n)
     call col2(gy%x, mixed_ops%coef_Xh%Binv, n)
     call col2(gz%x, mixed_ops%coef_Xh%Binv, n)
+    call cmult(gx%x, rho_inv, n)
+    call cmult(gy%x, rho_inv, n)
+    call cmult(gz%x, rho_inv, n)
 
     call mixed_ops%opdiv(w, gx%x, gy%x, gz%x)
     call neko_scratch_registry%relinquish_field(scratch_ids)
