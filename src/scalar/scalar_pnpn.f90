@@ -49,7 +49,6 @@ module scalar_pnpn
   use scalar_residual, only : scalar_residual_t, scalar_residual_factory
   use ax_product, only : ax_t, ax_helm_factory
   use field_series, only : field_series_t
-  use registry, only : neko_registry
   use facet_normal, only : facet_normal_t
   use krylov, only : ksp_monitor_t
   use device_math, only : device_add2s2, device_col2
@@ -213,12 +212,8 @@ contains
       call this%s_res%init(dm_Xh, "s_res")
 
       call this%abx1%init(dm_Xh, trim(this%name) // "_abx1")
-      call neko_registry%add_field(dm_Xh, trim(this%name) // "_abx1", &
-           ignore_existing = .true.)
 
       call this%abx2%init(dm_Xh, trim(this%name) // "_abx2")
-      call neko_registry%add_field(dm_Xh, trim(this%name) // "_abx2", &
-           ignore_existing = .true.)
 
       call this%advs%init(dm_Xh, "advs")
 
@@ -387,7 +382,7 @@ contains
               Xh, this%c_Xh, dm_Xh%size())
 
          call makeext%compute_scalar(this%abx1, this%abx2, f_Xh%x, &
-              rho%x(1,1,1,1), ext_bdf%advection_coeffs, n)
+              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
 
          call makeoifs%compute_scalar(this%advs%x, f_Xh%x, rho%x(1,1,1,1), dt,&
               n)
@@ -398,14 +393,14 @@ contains
 
          ! At this point the RHS contains the sum of the advection operator,
          ! Neumann boundary sources and additional source terms, evaluated using
-         ! the scalar field from the previous time-step. Now, this value is used in
-         ! the explicit time scheme to advance these terms in time.
+         ! the scalar field from the previous time-step. Now, this value is
+         ! used in the explicit time scheme to advance these terms in time.
          call makeext%compute_scalar(this%abx1, this%abx2, f_Xh%x, &
-              rho%x(1,1,1,1), ext_bdf%advection_coeffs, n)
+              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
 
          ! Add the RHS contributions coming from the BDF scheme.
          call makebdf%compute_scalar(slag, f_Xh%x, s, c_Xh%B, rho%x(1,1,1,1), &
-              dt, ext_bdf%diffusion_coeffs, ext_bdf%ndiff, n)
+              dt, ext_bdf%diffusion_coeffs%x, ext_bdf%ndiff, n)
       end if
 
       call slag%update()
@@ -419,7 +414,7 @@ contains
       ! Compute scalar residual.
       call profiler_start_region(trim(this%name) // '_residual', 20)
       call res%compute(Ax, s, s_res, f_Xh, c_Xh, msh, Xh, lambda_tot, &
-           rho%x(1,1,1,1)*cp%x(1,1,1,1), ext_bdf%diffusion_coeffs(1), dt, &
+           rho%x(1,1,1,1)*cp%x(1,1,1,1), ext_bdf%diffusion_coeffs%x(1), dt, &
            dm_Xh%size())
 
       call gs_Xh%op(s_res, GS_OP_ADD)

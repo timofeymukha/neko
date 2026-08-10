@@ -38,16 +38,18 @@ submodule (les_model) les_model_fctry
   use spalart_allmaras, only : spalart_allmaras_t
   use fluid_scheme_base, only : fluid_scheme_base_t
   use wale, only : wale_t
+  use deardorff, only : deardorff_t
   use utils, only : neko_type_registration_error
   implicit none
 
   ! List of all possible types created by the factory routine
-  character(len=20) :: LES_KNOWN_TYPES(6) = [character(len=20) :: &
+  character(len=20) :: LES_KNOWN_TYPES(7) = [character(len=20) :: &
        "vreman", &
        "smagorinsky", &
        "dymamic_smagorinsky", &
        "sigma", &
        "wale", &
+       "deardorff", &
        "spalart_allmaras"]
 
 contains
@@ -93,6 +95,8 @@ contains
        allocate(sigma_t::object)
     case ('wale')
        allocate(wale_t::object)
+    case ('deardorff')
+       allocate(deardorff_t::object)
     case ('spalart_allmaras')
        allocate(spalart_allmaras_t::object)
     case default

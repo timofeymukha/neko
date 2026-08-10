@@ -49,7 +49,7 @@ module fluid_scheme_incompressible
   use device_jacobi, only : device_jacobi_t
   use hsmg, only : hsmg_t
   use phmg, only : phmg_t
-  use precon, only : pc_t, precon_factory, precon_destroy
+  use precon, only : pc_t, precon_allocator, precon_destroy
   use fluid_stats, only : fluid_stats_t
   use bc, only : bc_t
   use bc_list, only : bc_list_t
@@ -84,6 +84,7 @@ module fluid_scheme_incompressible
      integer :: pr_projection_dim !< Size of the projection space for ksp_pr
      integer :: vel_projection_activ_step !< Steps to activate projection for ksp_vel
      integer :: pr_projection_activ_step !< Steps to activate projection for ksp_pr
+     logical :: pr_projection_reorthogonalize_basis !< To reorthogonalize proj basis
      logical :: strict_convergence !< Strict convergence for the velocity solver
      logical :: allow_stabilization !< Allow stabilization period
      !> Extrapolation velocity fields for LES
@@ -222,7 +223,9 @@ contains
     call json_get_or_lookup_or_default(params, &
          'case.fluid.pressure_solver.projection_hold_steps', &
          this%pr_projection_activ_step, 5)
-
+    call json_get_or_default(params, &
+         'case.fluid.pressure_solver.projection_reorthogonalize_basis', &
+         this%pr_projection_reorthogonalize_basis, .false.)
 
     call json_get_or_default(params, 'case.fluid.freeze', this%freeze, .false.)
 
@@ -364,13 +367,19 @@ contains
 
     do i = 1, this%bcs_vel%size()
        bc => this%bcs_vel%get(i)
-       call bc%free()
+       if (associated(bc)) then
+          call bc%free()
+          deallocate(bc)
+       end if
     end do
     call this%bcs_vel%free()
 
     do i = 1, this%bcs_prs%size()
        bc => this%bcs_prs%get(i)
-       call bc%free()
+       if (associated(bc)) then
+          call bc%free()
+          deallocate(bc)
+       end if
     end do
     call this%bcs_prs%free()
 
@@ -468,27 +477,27 @@ contains
     call this%bcs_vel%apply_vector(&
          this%u%x, this%v%x, this%w%x, this%dm_Xh%size(), time, strong)
 
-    call rotate_cyc(this%u%x, this%v%x, this%w%x, 1, this%c_Xh)
+    call rotate_cyc(this%u, this%v, this%w, 1, this%c_Xh)
     call this%gs_Xh%op(this%u, GS_OP_MIN, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
     call this%gs_Xh%op(this%v, GS_OP_MIN, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
     call this%gs_Xh%op(this%w, GS_OP_MIN, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
-    call rotate_cyc(this%u%x, this%v%x, this%w%x, 0, this%c_Xh)
+    call rotate_cyc(this%u, this%v, this%w, 0, this%c_Xh)
 
 
     call this%bcs_vel%apply_vector(&
          this%u%x, this%v%x, this%w%x, this%dm_Xh%size(), time, strong)
 
-    call rotate_cyc(this%u%x, this%v%x, this%w%x, 1, this%c_Xh)
+    call rotate_cyc(this%u, this%v, this%w, 1, this%c_Xh)
     call this%gs_Xh%op(this%u, GS_OP_MAX, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
     call this%gs_Xh%op(this%v, GS_OP_MAX, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
     call this%gs_Xh%op(this%w, GS_OP_MAX, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
-    call rotate_cyc(this%u%x, this%v%x, this%w%x, 0, this%c_Xh)
+    call rotate_cyc(this%u, this%v, this%w, 0, this%c_Xh)
 
     do i = 1, this%bcs_vel%size()
        b => this%bcs_vel%get(i)
@@ -553,7 +562,7 @@ contains
     character(len=*) :: pctype
     type(json_file), intent(inout) :: pcparams
 
-    call precon_factory(pc, pctype)
+    call precon_allocator(pc, pctype)
 
     select type (pcp => pc)
     type is (jacobi_t)
@@ -578,7 +587,7 @@ contains
     real(kind=rp), intent(in) :: dt
     real(kind=rp) :: c
 
-    c = cfl(dt, this%u%x, this%v%x, this%w%x, &
+    c = cfl(dt, this%u, this%v, this%w, &
          this%Xh, this%c_Xh, this%msh%nelv, this%msh%gdim)
 
   end function fluid_compute_cfl

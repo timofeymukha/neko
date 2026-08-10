@@ -46,7 +46,7 @@ module lambda2
   use case, only : case_t
   use field_writer, only : field_writer_t
   use time_based_controller, only : time_based_controller_t
-  use device
+  use utils, only : NEKO_VARNAME_LEN
   implicit none
   private
 
@@ -97,7 +97,7 @@ contains
     type(json_file), intent(inout) :: json
     class(case_t), intent(inout), target ::case
     character(len=:), allocatable :: name
-    character(len=20) :: fields(1)
+    character(len=NEKO_VARNAME_LEN) :: fields(1)
     type(field_t), pointer :: u, v, w, lambda2
 
     call json_get_or_default(json, "name", name, "lambda2")
@@ -149,7 +149,7 @@ contains
     character(len=*), intent(in), optional :: filename
     integer, intent(in), optional :: precision
 
-    character(len=20) :: fields(1)
+    character(len=NEKO_VARNAME_LEN) :: fields(1)
     fields(1) = "lambda2"
 
     call this%init_base_from_components(case, order, preprocess_controller, &
@@ -192,7 +192,7 @@ contains
     character(len=*), intent(in), optional :: filename
     integer, intent(in), optional :: precision
 
-    character(len=20) :: fields(1)
+    character(len=NEKO_VARNAME_LEN) :: fields(1)
     fields(1) = "lambda2"
 
     call this%init_base_from_components(case, order, preprocess_control, &

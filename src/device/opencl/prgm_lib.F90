@@ -56,6 +56,9 @@ module opencl_prgm_lib
   !> Device Velocity gradient kernels
   type(c_ptr), public, bind(c) :: opgrad_program = C_NULL_PTR
 
+  !> Device cyclic boundary rotation kernels
+  type(c_ptr), public, bind(c) :: rotate_program = C_NULL_PTR
+
   !> Device Gather-Scatter kernels
   type(c_ptr), public, bind(c) :: gs_program = C_NULL_PTR
 
@@ -77,8 +80,8 @@ module opencl_prgm_lib
   !> Device pnpn residual kernels (stress formulation)
   type(c_ptr), public, bind(c) :: pnpn_stress_res_program = C_NULL_PTR
 
-  !> Device euler residual kernels
-  type(c_ptr), public, bind(c) :: euler_res_program = C_NULL_PTR
+  !> Device compressible residual kernels
+  type(c_ptr), public, bind(c) :: compressible_res_program = C_NULL_PTR
 
   !> Device compressible ops kernels
   type(c_ptr), public, bind(c) :: &
@@ -98,6 +101,9 @@ module opencl_prgm_lib
 
   !> Device dong kernels
   type(c_ptr), public, bind(c) :: dong_program = C_NULL_PTR
+
+  !> Device Cai-Sagaut Model-II kernels
+  type(c_ptr), public, bind(c) :: cai_sagaut_model_ii_program = C_NULL_PTR
 
   !> Device coef kernels
   type(c_ptr), public, bind(c) :: coef_program = C_NULL_PTR
@@ -217,6 +223,13 @@ contains
        opgrad_program = C_NULL_PTR
     end if
 
+    if (c_associated(rotate_program)) then
+       if (clReleaseProgram(rotate_program) .ne. CL_SUCCESS) then
+          call neko_error('Failed to release program')
+       end if
+       rotate_program = C_NULL_PTR
+    end if
+
     if (c_associated(gs_program)) then
        if (clReleaseProgram(gs_program) .ne. CL_SUCCESS) then
           call neko_error('Failed to release program')
@@ -266,11 +279,11 @@ contains
        pnpn_stress_res_program = C_NULL_PTR
     end if
 
-    if (c_associated(euler_res_program)) then
-       if (clReleaseProgram(euler_res_program) .ne. CL_SUCCESS) then
+    if (c_associated(compressible_res_program)) then
+       if (clReleaseProgram(compressible_res_program) .ne. CL_SUCCESS) then
           call neko_error('Failed to release program')
        end if
-       euler_res_program = C_NULL_PTR
+       compressible_res_program = C_NULL_PTR
     end if
 
     if (c_associated(compressible_ops_compute_max_wave_speed_program)) then
@@ -325,6 +338,13 @@ contains
        dong_program = C_NULL_PTR
     end if
 
+    if (c_associated(cai_sagaut_model_ii_program)) then
+       if (clReleaseProgram(cai_sagaut_model_ii_program) .ne. CL_SUCCESS) then
+          call neko_error('Failed to release program')
+       end if
+       cai_sagaut_model_ii_program = C_NULL_PTR
+    end if
+
     if (c_associated(coef_program)) then
        if (clReleaseProgram(coef_program) .ne. CL_SUCCESS) then
           call neko_error('Failed to release program')
@@ -347,7 +367,8 @@ contains
     end if
 
     if (c_associated(compute_max_wave_speed_program)) then
-       if (clReleaseProgram(compute_max_wave_speed_program) .ne. CL_SUCCESS) then
+       if (clReleaseProgram(compute_max_wave_speed_program) .ne. &
+            CL_SUCCESS) then
           call neko_error('Failed to release program')
        end if
        compute_max_wave_speed_program = C_NULL_PTR

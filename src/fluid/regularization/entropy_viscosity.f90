@@ -57,7 +57,8 @@ module entropy_viscosity
        entropy_viscosity_apply_element_max_cpu, &
        entropy_viscosity_clamp_to_low_order_cpu, &
        entropy_viscosity_smooth_divide_cpu
-  use entropy_viscosity_device, only : entropy_viscosity_compute_residual_device, &
+  use entropy_viscosity_device, only : &
+       entropy_viscosity_compute_residual_device, &
        entropy_viscosity_compute_viscosity_device, &
        entropy_viscosity_apply_element_max_device, &
        entropy_viscosity_clamp_to_low_order_device, &
@@ -84,11 +85,16 @@ module entropy_viscosity
      procedure, pass(this) :: free => entropy_viscosity_free
      procedure, pass(this) :: compute => entropy_viscosity_compute
      procedure, pass(this) :: update_lag => entropy_viscosity_update_lag
-     procedure, pass(this), private :: compute_residual => entropy_viscosity_compute_residual
-     procedure, pass(this), private :: compute_viscosity => entropy_viscosity_compute_viscosity
-     procedure, pass(this), private :: smooth_viscosity => entropy_viscosity_smooth_viscosity
-     procedure, pass(this), private :: apply_element_max => entropy_viscosity_apply_element_max
-     procedure, pass(this), private :: low_order_viscosity => entropy_viscosity_low_order
+     procedure, pass(this), private :: compute_residual => &
+          entropy_viscosity_compute_residual
+     procedure, pass(this), private :: compute_viscosity => &
+          entropy_viscosity_compute_viscosity
+     procedure, pass(this), private :: smooth_viscosity => &
+          entropy_viscosity_smooth_viscosity
+     procedure, pass(this), private :: apply_element_max => &
+          entropy_viscosity_apply_element_max
+     procedure, pass(this), private :: low_order_viscosity => &
+          entropy_viscosity_low_order
   end type entropy_viscosity_t
 
   public :: entropy_viscosity_set_fields
@@ -105,7 +111,8 @@ contains
     call this%init_base(json, coef, dof, reg_coeff)
 
     call json_get_or_default(json, 'c_avisc_low', this%c_avisc_low, 1.0_rp)
-    call json_get_or_default(json, 'c_avisc_entropy', this%c_avisc_entropy, 1.0_rp)
+    call json_get_or_default(json, 'c_avisc_entropy', &
+         this%c_avisc_entropy, 1.0_rp)
 
     call this%entropy_residual%init(dof, 'entropy_residual')
 
@@ -145,9 +152,6 @@ contains
     type(time_state_t), intent(in) :: time
     integer, intent(in) :: tstep
     real(kind=rp), intent(in) :: dt
-    integer :: i, n
-
-    n = this%dof%size()
 
     call this%compute_residual(tstep, dt, time%dtlag)
     call this%compute_viscosity(tstep)
@@ -159,7 +163,7 @@ contains
     integer, intent(in) :: tstep
     real(kind=rp), intent(in) :: dt
     real(kind=rp), intent(in) :: dt_lag(10)
-    integer :: i, n
+    integer :: n
     type(field_t), pointer :: us_field, vs_field, ws_field, div_field
     integer :: temp_indices(4)
     real(kind=rp) :: bdf_coeffs(4)
@@ -195,18 +199,16 @@ contains
     call neko_scratch_registry%request_field(us_field, temp_indices(1), .false.)
     call neko_scratch_registry%request_field(vs_field, temp_indices(2), .false.)
     call neko_scratch_registry%request_field(ws_field, temp_indices(3), .false.)
-    call neko_scratch_registry%request_field(div_field, temp_indices(4), .false.)
+    call neko_scratch_registry%request_field(div_field, temp_indices(4), &
+         .false.)
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call device_col3(us_field%x_d, this%u%x_d, this%S%x_d, n)
        call device_col3(vs_field%x_d, this%v%x_d, this%S%x_d, n)
        call device_col3(ws_field%x_d, this%w%x_d, this%S%x_d, n)
     else
-       do i = 1, n
-          us_field%x(i,1,1,1) = this%u%x(i,1,1,1) * this%S%x(i,1,1,1)
-          vs_field%x(i,1,1,1) = this%v%x(i,1,1,1) * this%S%x(i,1,1,1)
-          ws_field%x(i,1,1,1) = this%w%x(i,1,1,1) * this%S%x(i,1,1,1)
-       end do
+       call entropy_viscosity_col3_vector_cpu(us_field%x, vs_field%x, &
+            ws_field%x, this%u%x, this%v%x, this%w%x, this%S%x, n)
     end if
 
     call div(div_field%x, us_field%x, vs_field%x, ws_field%x, this%coef)
@@ -218,10 +220,7 @@ contains
             sync = .true.)
     end if
 
-    do i = 1, n
-       this%entropy_residual%x(i,1,1,1) = abs(this%entropy_residual%x(i,1,1,1) &
-            + div_field%x(i,1,1,1))
-    end do
+    call entropy_viscosity_abs_add_cpu(this%entropy_residual%x, div_field%x, n)
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call device_memcpy(this%entropy_residual%x, this%entropy_residual%x_d, &
@@ -235,7 +234,7 @@ contains
   subroutine entropy_viscosity_compute_viscosity(this, tstep)
     class(entropy_viscosity_t), intent(inout) :: this
     integer, intent(in) :: tstep
-    integer :: i, n, temp_indices(1)
+    integer :: n, temp_indices(1)
     real(kind=rp) :: S_mean, n_S
     type(field_t), pointer :: temp_field
 
@@ -246,7 +245,8 @@ contains
        return
     end if
 
-    call neko_scratch_registry%request_field(temp_field, temp_indices(1), .false.)
+    call neko_scratch_registry%request_field(temp_field, temp_indices(1), &
+         .false.)
 
     call field_cfill(temp_field, 1.0_rp, n)
     S_mean = field_glsum(this%S, n) / field_glsum(temp_field, n)
@@ -282,7 +282,7 @@ contains
             this%h%x, this%c_avisc_entropy, n_S, n)
     end if
 
-    ! effective viscosity = min(entropy viscosity, low-order viscosity)
+    ! artificial viscosity = min(entropy viscosity, low-order viscosity)
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call entropy_viscosity_clamp_to_low_order_device( &
             this%reg_coeff%x_d, this%h%x_d, this%max_wave_speed%x_d, &
@@ -309,8 +309,10 @@ contains
 
     n = this%dof%size()
 
-    call neko_scratch_registry%request_field(temp_field, temp_indices(1), .false.)
-    call neko_scratch_registry%request_field(mult_field, temp_indices(2), .false.)
+    call neko_scratch_registry%request_field(temp_field, temp_indices(1), &
+         .false.)
+    call neko_scratch_registry%request_field(mult_field, temp_indices(2), &
+         .false.)
 
     call field_copy(temp_field, this%reg_coeff, n)
     call this%gs%op(temp_field, GS_OP_ADD)
@@ -375,6 +377,42 @@ contains
     call this%S_lag%update()
 
   end subroutine entropy_viscosity_update_lag
+
+  subroutine entropy_viscosity_col3_vector_cpu(us, vs, ws, u, v, w, S, n)
+    integer, intent(in) :: n
+    real(kind=rp), intent(out) :: us(n), vs(n), ws(n)
+    real(kind=rp), intent(in) :: u(n), v(n), w(n), S(n)
+    integer :: i
+
+    !OCL NORECURRENCE, NOVREC, NOALIAS
+    !DIR$ CONCURRENT
+    !DIR$ IVDEP
+    !GCC$ ivdep
+    !$omp parallel do simd
+    do i = 1, n
+       us(i) = u(i) * S(i)
+       vs(i) = v(i) * S(i)
+       ws(i) = w(i) * S(i)
+    end do
+    !$omp end parallel do simd
+  end subroutine entropy_viscosity_col3_vector_cpu
+
+  subroutine entropy_viscosity_abs_add_cpu(entropy_residual, div_field, n)
+    integer, intent(in) :: n
+    real(kind=rp), intent(inout) :: entropy_residual(n)
+    real(kind=rp), intent(in) :: div_field(n)
+    integer :: i
+
+    !OCL NORECURRENCE, NOVREC, NOALIAS
+    !DIR$ CONCURRENT
+    !DIR$ IVDEP
+    !GCC$ ivdep
+    !$omp parallel do simd
+    do i = 1, n
+       entropy_residual(i) = abs(entropy_residual(i) + div_field(i))
+    end do
+    !$omp end parallel do simd
+  end subroutine entropy_viscosity_abs_add_cpu
 
   !> Compute low-order viscosity at point i: c_avisc_low * h * max_wave_speed
   pure function entropy_viscosity_low_order(this, i) result(visc)

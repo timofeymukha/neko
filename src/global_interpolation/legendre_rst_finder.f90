@@ -70,7 +70,7 @@ contains
     type(space_t), target, intent(in) :: Xh
     integer, intent(in) :: nelv
     real(kind=rp), intent(in), dimension(nelv*Xh%lxyz) :: x, y, z
-    real(kind=rp), intent(in), optional :: tol
+    real(kind=dp), intent(in), optional :: tol
     integer, intent(in), optional :: max_iter
 
     call this%free()
@@ -203,6 +203,7 @@ contains
     converged = .false.
     !Iterate until found, not heavily optimized
     do while (.not. converged)
+       iter = iter + 1
        call device_find_rst_legendre(rst, pt_x, pt_y, pt_z, &
             this%x_hat%x_d, this%y_hat%x_d, this%z_hat%x_d, &
             resx, resy, resz, &
@@ -211,7 +212,7 @@ contains
        !This can be made more approriate... avoid memcpy at least
        conv_sum = device_vlsc3(conv_pts%x_d,conv_pts%x_d,conv_pts%x_d,n_pts)
        converged = conv_sum .lt. 0.5
-       print *, conv_sum
+       !print *, conv_sum
        if( iter .ge. this%max_iter) converged = .true.
     end do
 
