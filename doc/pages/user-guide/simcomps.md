@@ -666,6 +666,35 @@ keywords:
     - `TKE_source_field`: The field name of the source terms in the TKE equation
       including shear production, buoyancy contribution and dissipation,
       defaults to `TKE_source`.
+  - `spalart_allmaras`: The Spalart--Allmaras RANS model family. The working
+    variable is advanced by a scalar equation and coupled to this component by
+    the following keywords:
+    - `variant`: Selects `sa`, `sa-neg`, `sa-noft2`, or `sa-noft2-neg`, and
+      defaults to `sa`. Qualifiers are stacked following the NASA Turbulence
+      Modeling Resource convention. The `neg` treatment is evaluated locally
+      at nodes where the working variable is negative. A `noft2` variant fixes
+      \f$c_{t3}=0\f$. All variants use the NASA Note 1(c) definition of
+      \f$\widetilde S\f$, with \f$c_2=0.7\f$ and \f$c_3=0.9\f$.
+    - `scalar_field`: The transported working-variable field, defaults to
+      `sa_nu_tilde`.
+    - `source_field`: The non-diffusive SA source field, defaults to
+      `sa_source`.
+    - `alphat_field`: The variable part of the SA diffusivity, defaults to
+      `sa_alphat`.
+    - `wall_distance_zone_indices`: The required array of no-slip wall zone
+      indices. The current implementation uses a temporary graph-based
+      distance approximation.
+    - `min_wall_distance`: The positive lower bound used only while evaluating
+      wall source terms, defaults to \f$10^{-12}\f$.
+    - `cb1`, `cb2`, `sigma`, `cw2`, `cw3`, `cv1`, `ct3`, `ct4`, `kappa`, and
+      `cn1`: Optional model constants. They default to the standard SA values,
+      and \f$c_{w1}\f$ is derived from them. The `cn1` constant is used only by
+      variants with negative treatment.
+    The scalar molecular conductivity must be set to
+    \f$\rho c_p \nu / \sigma\f$, use `alphat_field` with
+    `nut_dependency: false`, and add `source_field` as a field source. The fluid
+    must use the component's `nut_field`. See `examples/sa_flat_plate` for a
+    complete setup.
 - `les_delta`: Selects the way to compute the LES filter length scale. Currently
   three alternatives are provided and the default one is `pointwise` if nothing
   is specified:

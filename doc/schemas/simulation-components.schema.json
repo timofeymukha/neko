@@ -490,7 +490,8 @@
             "vreman",
             "sigma",
             "wale",
-            "deardorff"
+            "deardorff",
+            "spalart_allmaras"
           ]
         },
         "nut_field": {

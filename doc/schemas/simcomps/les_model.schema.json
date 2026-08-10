@@ -159,6 +159,75 @@
                     }
                   },
                   "additionalProperties": true
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "wall_distance_zone_indices"
+                  ],
+                  "properties": {
+                    "model": {
+                      "const": "spalart_allmaras"
+                    },
+                    "variant": {
+                      "enum": [
+                        "sa",
+                        "sa-neg",
+                        "sa-noft2",
+                        "sa-noft2-neg"
+                      ]
+                    },
+                    "scalar_field": {
+                      "$ref": "urn:neko:schema:simulation-components#/$defs/nonEmptyString"
+                    },
+                    "source_field": {
+                      "$ref": "urn:neko:schema:simulation-components#/$defs/nonEmptyString"
+                    },
+                    "alphat_field": {
+                      "$ref": "urn:neko:schema:simulation-components#/$defs/nonEmptyString"
+                    },
+                    "wall_distance_zone_indices": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "integer"
+                      }
+                    },
+                    "min_wall_distance": {
+                      "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                    },
+                    "cb1": {
+                      "$ref": "urn:neko:schema:simulation-components#/$defs/numberOrRef"
+                    },
+                    "cb2": {
+                      "$ref": "urn:neko:schema:simulation-components#/$defs/numberOrRef"
+                    },
+                    "sigma": {
+                      "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                    },
+                    "cw2": {
+                      "$ref": "urn:neko:schema:simulation-components#/$defs/numberOrRef"
+                    },
+                    "cw3": {
+                      "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                    },
+                    "cv1": {
+                      "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                    },
+                    "ct3": {
+                      "$ref": "urn:neko:schema:simulation-components#/$defs/numberOrRef"
+                    },
+                    "ct4": {
+                      "$ref": "urn:neko:schema:simulation-components#/$defs/numberOrRef"
+                    },
+                    "kappa": {
+                      "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                    },
+                    "cn1": {
+                      "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                    }
+                  },
+                  "additionalProperties": true
                 }
               ]
             }

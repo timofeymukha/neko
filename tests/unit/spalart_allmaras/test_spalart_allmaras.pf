@@ -1,0 +1,248 @@
+module test_spalart_allmaras
+  use num_types, only : rp
+  use spalart_allmaras_model, only : spalart_allmaras_cw1, &
+       spalart_allmaras_pointwise, sa_default_cb1, sa_default_cb2, &
+       sa_default_sigma, sa_default_cw2, sa_default_cw3, &
+       sa_default_cv1, sa_default_ct3, sa_default_ct4, &
+       sa_default_kappa, sa_default_cn1, sa_default_c2, sa_default_c3
+  implicit none
+
+contains
+
+  @test
+  subroutine test_standard_constants
+    use pfunit
+    implicit none
+
+    real(kind=rp) :: cw1
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+
+    @assertEqual(3.23906781677572875_rp, cw1, tolerance=1.0e-14_rp)
+    @assertEqual(0.7_rp, sa_default_c2, tolerance=1.0e-14_rp)
+    @assertEqual(0.9_rp, sa_default_c3, tolerance=1.0e-14_rp)
+  end subroutine test_standard_constants
+
+  @test
+  subroutine test_zero_working_variable
+    use pfunit
+    implicit none
+
+    real(kind=rp) :: cw1, nut, alphat, source
+    real(kind=rp) :: fv1, fv2, ft2, s_tilde, r, fw
+    real(kind=rp) :: production, cross_diffusion, destruction
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+    call spalart_allmaras_pointwise(0.0_rp, 2.0e-7_rp, 1.25_rp, &
+         0.02_rp, 0.0_rp, sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, cw1, sa_default_cw2, sa_default_cw3, &
+         sa_default_cv1, sa_default_ct3, sa_default_ct4, &
+         sa_default_kappa, sa_default_cn1, .false., nut, alphat, &
+         source, fv1, fv2, ft2, &
+         s_tilde, r, fw, production, cross_diffusion, destruction)
+
+    @assertEqual(0.0_rp, nut, tolerance=1.0e-30_rp)
+    @assertEqual(0.0_rp, alphat, tolerance=1.0e-30_rp)
+    @assertEqual(0.0_rp, source, tolerance=1.0e-30_rp)
+    @assertEqual(0.0_rp, fv1, tolerance=1.0e-30_rp)
+    @assertEqual(1.0_rp, fv2, tolerance=1.0e-14_rp)
+    @assertEqual(1.2_rp, ft2, tolerance=1.0e-14_rp)
+    @assertEqual(1.25_rp, s_tilde, tolerance=1.0e-14_rp)
+    @assertEqual(0.0_rp, r, tolerance=1.0e-30_rp)
+    @assertEqual(0.0_rp, fw, tolerance=1.0e-30_rp)
+    @assertEqual(0.0_rp, production, tolerance=1.0e-30_rp)
+    @assertEqual(0.0_rp, cross_diffusion, tolerance=1.0e-30_rp)
+    @assertEqual(0.0_rp, destruction, tolerance=1.0e-30_rp)
+  end subroutine test_zero_working_variable
+
+  @test
+  subroutine test_standard_reference_state
+    use pfunit
+    implicit none
+
+    real(kind=rp) :: cw1, nut, alphat, source
+    real(kind=rp) :: fv1, fv2, ft2, s_tilde, r, fw
+    real(kind=rp) :: production, cross_diffusion, destruction
+    real(kind=rp) :: expected
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+    call spalart_allmaras_pointwise(6.0e-7_rp, 2.0e-7_rp, &
+         1.25_rp, 0.02_rp, 4.0e-10_rp, sa_default_cb1, &
+         sa_default_cb2, sa_default_sigma, cw1, sa_default_cw2, &
+         sa_default_cw3, sa_default_cv1, sa_default_ct3, &
+         sa_default_ct4, sa_default_kappa, sa_default_cn1, .false., &
+         nut, alphat, source, fv1, fv2, ft2, s_tilde, r, fw, production, &
+         cross_diffusion, destruction)
+
+    @assertEqual(7.01460857185167569e-2_rp, fv1, tolerance=1.0e-14_rp)
+    @assertEqual(-1.47844116150938687_rp, fv2, tolerance=1.0e-14_rp)
+    @assertEqual(1.33307958458907666e-2_rp, ft2, tolerance=1.0e-14_rp)
+    @assertEqual(1.23680748517391970_rp, s_tilde, tolerance=1.0e-14_rp)
+    @assertEqual(7.21475255548940497e-3_rp, r, tolerance=1.0e-14_rp)
+    @assertEqual(5.06339386591430751e-3_rp, fw, tolerance=1.0e-14_rp)
+    @assertEqual(4.20876514311100552e-8_rp, nut, tolerance=1.0e-20_rp)
+    @assertEqual(9.0e-7_rp, alphat, tolerance=1.0e-20_rp)
+    expected = 9.92120043812866434e-8_rp
+    @assertEqual(expected, production, tolerance=1.0e-20_rp)
+    @assertEqual(3.732e-10_rp, cross_diffusion, tolerance=1.0e-22_rp)
+    expected = 5.08963555022628799e-12_rp
+    @assertEqual(expected, destruction, tolerance=1.0e-24_rp)
+    expected = 9.95801147457364084e-8_rp
+    @assertEqual(expected, source, tolerance=1.0e-20_rp)
+  end subroutine test_standard_reference_state
+
+  @test
+  subroutine test_scalar_diffusion_split
+    use pfunit
+    implicit none
+
+    real(kind=rp), parameter :: nu = 2.0e-7_rp
+    real(kind=rp), parameter :: nu_tilde = 6.0e-7_rp
+    real(kind=rp) :: cw1, nut, alphat, source
+    real(kind=rp) :: molecular_diffusivity, total_diffusivity
+    real(kind=rp) :: expected
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+    call spalart_allmaras_pointwise(nu_tilde, nu, 1.0_rp, 1.0_rp, &
+         0.0_rp, sa_default_cb1, sa_default_cb2, sa_default_sigma, &
+         cw1, sa_default_cw2, sa_default_cw3, sa_default_cv1, &
+         sa_default_ct3, sa_default_ct4, sa_default_kappa, &
+         sa_default_cn1, .false., nut, alphat, source)
+
+    molecular_diffusivity = nu / sa_default_sigma
+    total_diffusivity = molecular_diffusivity + alphat
+    expected = (nu + nu_tilde) / sa_default_sigma
+    @assertEqual(expected, total_diffusivity, tolerance=1.0e-20_rp)
+  end subroutine test_scalar_diffusion_split
+
+  @test
+  subroutine test_noft2_positive_branch
+    use pfunit
+    implicit none
+
+    real(kind=rp) :: cw1, nut, alphat, source
+    real(kind=rp) :: expected, ft2, production
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+    call spalart_allmaras_pointwise(6.0e-7_rp, 2.0e-7_rp, &
+         1.25_rp, 0.02_rp, 4.0e-10_rp, sa_default_cb1, &
+         sa_default_cb2, sa_default_sigma, cw1, sa_default_cw2, &
+         sa_default_cw3, sa_default_cv1, 0.0_rp, sa_default_ct4, &
+         sa_default_kappa, sa_default_cn1, .true., nut, alphat, source, &
+         ft2_out=ft2, production_out=production)
+
+    @assertEqual(0.0_rp, ft2, tolerance=1.0e-30_rp)
+    expected = 1.0055244854463967e-7_rp
+    @assertEqual(expected, production, tolerance=1.0e-20_rp)
+    @assertEqual(4.20876514311100552e-8_rp, nut, tolerance=1.0e-20_rp)
+  end subroutine test_noft2_positive_branch
+
+  @test
+  subroutine test_noft2_negative_branch
+    use pfunit
+    implicit none
+
+    real(kind=rp), parameter :: nu = 2.0e-7_rp
+    real(kind=rp), parameter :: nu_tilde = -1.4e-7_rp
+    real(kind=rp) :: cw1, nut, alphat, source
+    real(kind=rp) :: ft2, production, cross_diffusion, destruction
+    real(kind=rp) :: expected, total_diffusivity
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+    call spalart_allmaras_pointwise(nu_tilde, nu, 1.25_rp, 0.02_rp, &
+         4.0e-10_rp, sa_default_cb1, sa_default_cb2, sa_default_sigma, &
+         cw1, sa_default_cw2, sa_default_cw3, sa_default_cv1, 0.0_rp, &
+         sa_default_ct4, sa_default_kappa, sa_default_cn1, .true., nut, &
+         alphat, source, ft2_out=ft2, production_out=production, &
+         cross_diffusion_out=cross_diffusion, &
+         destruction_out=destruction)
+
+    total_diffusivity = nu / sa_default_sigma + alphat
+    @assertEqual(0.0_rp, nut, tolerance=1.0e-30_rp)
+    @assertEqual(0.0_rp, ft2, tolerance=1.0e-30_rp)
+    expected = -2.0118521691243961e-7_rp
+    @assertEqual(expected, alphat, tolerance=1.0e-20_rp)
+    expected = 9.881478308756037e-8_rp
+    @assertEqual(expected, total_diffusivity, tolerance=1.0e-20_rp)
+    @assertEqual(-2.37125e-8_rp, production, tolerance=1.0e-20_rp)
+    @assertEqual(3.732e-10_rp, cross_diffusion, tolerance=1.0e-22_rp)
+    expected = -1.5871432302201074e-10_rp
+    @assertEqual(expected, destruction, tolerance=1.0e-22_rp)
+    expected = -2.318058567697799e-8_rp
+    @assertEqual(expected, source, tolerance=1.0e-20_rp)
+  end subroutine test_noft2_negative_branch
+
+  @test
+  subroutine test_negative_branch_at_fv1_pole
+    use pfunit
+    implicit none
+
+    real(kind=rp), parameter :: nu = 1.0e-5_rp
+    real(kind=rp) :: cw1, nut, alphat, source
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+    call spalart_allmaras_pointwise(-sa_default_cv1 * nu, nu, 1.0_rp, &
+         0.1_rp, 0.0_rp, sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, cw1, sa_default_cw2, sa_default_cw3, &
+         sa_default_cv1, 0.0_rp, sa_default_ct4, sa_default_kappa, &
+         sa_default_cn1, .true., nut, alphat, source)
+
+    @assertEqual(0.0_rp, nut, tolerance=1.0e-30_rp)
+    @assertTrue(alphat > 0.0_rp)
+    @assertTrue(source < 0.0_rp)
+  end subroutine test_negative_branch_at_fv1_pole
+
+  @test
+  subroutine test_note_1c_modified_s_tilde
+    use pfunit
+    implicit none
+
+    real(kind=rp) :: cw1, nut, alphat, source
+    real(kind=rp) :: expected, s_tilde, production
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+    call spalart_allmaras_pointwise(6.0e-7_rp, 2.0e-7_rp, &
+         1.0e-3_rp, 0.02_rp, 0.0_rp, sa_default_cb1, &
+         sa_default_cb2, sa_default_sigma, cw1, sa_default_cw2, &
+         sa_default_cw3, sa_default_cv1, 0.0_rp, sa_default_ct4, &
+         sa_default_kappa, sa_default_cn1, .true., nut, alphat, source, &
+         s_tilde_out=s_tilde, production_out=production)
+
+    expected = 1.0315146372079150e-4_rp
+    @assertEqual(expected, s_tilde, tolerance=1.0e-16_rp)
+    expected = 8.3862140005003492e-12_rp
+    @assertEqual(expected, production, tolerance=1.0e-23_rp)
+    @assertTrue(s_tilde > 0.0_rp)
+  end subroutine test_note_1c_modified_s_tilde
+
+  @test
+  subroutine test_note_1c_zero_vorticity_guard
+    use pfunit
+    implicit none
+
+    real(kind=rp) :: cw1, nut, alphat, source, r
+    real(kind=rp) :: s_tilde, production
+
+    cw1 = spalart_allmaras_cw1(sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, sa_default_kappa)
+    call spalart_allmaras_pointwise(6.0e-7_rp, 2.0e-7_rp, &
+         0.0_rp, 0.02_rp, 0.0_rp, sa_default_cb1, sa_default_cb2, &
+         sa_default_sigma, cw1, sa_default_cw2, sa_default_cw3, &
+         sa_default_cv1, sa_default_ct3, sa_default_ct4, &
+         sa_default_kappa, sa_default_cn1, .false., nut, alphat, source, &
+         s_tilde_out=s_tilde, r_out=r, production_out=production)
+
+    @assertEqual(0.0_rp, s_tilde, tolerance=1.0e-30_rp)
+    @assertEqual(10.0_rp, r, tolerance=1.0e-14_rp)
+    @assertEqual(0.0_rp, production, tolerance=1.0e-30_rp)
+  end subroutine test_note_1c_zero_vorticity_guard
+
+end module test_spalart_allmaras
