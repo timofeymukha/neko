@@ -2,7 +2,7 @@
 
 ## Develop
 
-- Added the asymmetric spectral vanishing viscosity formulation for implicit
+- Added the Kirby-Sherwin spectral vanishing viscosity formulation for implicit
   fluid and scalar solves, including the full-stress fluid operator, on CPU,
   CUDA, and HIP backends.
 - The CUDA and HIP auto-tuners for `ax_helm` and the SEM operators (`opgrad`,

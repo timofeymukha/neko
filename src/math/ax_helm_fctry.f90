@@ -40,10 +40,10 @@ submodule (ax_product) ax_helm_fctry
   use ax_helm_cpu, only : ax_helm_cpu_t
   use ax_helm_full_cpu, only : ax_helm_full_cpu_t
   use ax_helm_full_device, only : ax_helm_full_device_t
-  use ax_helm_svv_cpu, only : ax_helm_svv_cpu_t
-  use ax_helm_svv_device, only : ax_helm_svv_device_t
-  use ax_helm_svv_full_cpu, only : ax_helm_svv_full_cpu_t
-  use ax_helm_svv_full_device, only : ax_helm_svv_full_device_t
+  use ax_helm_svv_KS_cpu, only : ax_helm_svv_KS_cpu_t
+  use ax_helm_svv_KS_device, only : ax_helm_svv_KS_device_t
+  use ax_helm_svv_KS_full_cpu, only : ax_helm_svv_KS_full_cpu_t
+  use ax_helm_svv_KS_full_device, only : ax_helm_svv_KS_full_device_t
   use spectral_vanishing_viscosity, only : svv_t
   use utils, only : neko_error
   implicit none
@@ -55,7 +55,7 @@ contains
   !! @param object The matrix-vector product type to be allocated.
   !! @param full_formulation Whether to use the formulation with the full
   !! viscous stress tensor, not assuming constant material properties.
-  !! @param svv Optional asymmetric SVV data.
+  !! @param svv Optional SVV object.
   module subroutine ax_helm_factory(object, full_formulation, svv)
     class(ax_t), allocatable, intent(inout) :: object
     logical, intent(in) :: full_formulation
@@ -72,12 +72,12 @@ contains
       else if (NEKO_BCKND_DEVICE .eq. 1) then
          if (present(svv)) then
             if (NEKO_BCKND_CUDA .ne. 1 .and. NEKO_BCKND_HIP .ne. 1) then
-               call neko_error("Asymmetric full-stress SVV is only " // &
+               call neko_error("Full-stress SVV is only " // &
                     "available on CPU, CUDA, and HIP backends")
             end if
-            allocate(ax_helm_svv_full_device_t::object)
+            allocate(ax_helm_svv_KS_full_device_t::object)
             select type (operator => object)
-            type is (ax_helm_svv_full_device_t)
+            type is (ax_helm_svv_KS_full_device_t)
                operator%svv => svv
             end select
          else
@@ -85,9 +85,9 @@ contains
          end if
       else
          if (present(svv)) then
-            allocate(ax_helm_svv_full_cpu_t::object)
+            allocate(ax_helm_svv_KS_full_cpu_t::object)
             select type (operator => object)
-            type is (ax_helm_svv_full_cpu_t)
+            type is (ax_helm_svv_KS_full_cpu_t)
                operator%svv => svv
             end select
          else
@@ -96,22 +96,22 @@ contains
       end if
     else if (present(svv)) then
        if (NEKO_BCKND_SX .eq. 1 .or. NEKO_BCKND_XSMM .eq. 1) then
-          call neko_error("Asymmetric SVV is not available with the SX or " // &
+          call neko_error("SVV is not available with the SX or " // &
                "XSMM backend")
        else if (NEKO_BCKND_DEVICE .eq. 1) then
           if (NEKO_BCKND_CUDA .ne. 1 .and. NEKO_BCKND_HIP .ne. 1) then
-             call neko_error("Asymmetric SVV is only available on CPU, " // &
+             call neko_error("SVV is only available on CPU, " // &
                   "CUDA, and HIP backends")
           end if
-          allocate(ax_helm_svv_device_t::object)
+          allocate(ax_helm_svv_KS_device_t::object)
           select type (operator => object)
-          type is (ax_helm_svv_device_t)
+          type is (ax_helm_svv_KS_device_t)
              operator%svv => svv
           end select
        else
-          allocate(ax_helm_svv_cpu_t::object)
+          allocate(ax_helm_svv_KS_cpu_t::object)
           select type (operator => object)
-          type is (ax_helm_svv_cpu_t)
+          type is (ax_helm_svv_KS_cpu_t)
              operator%svv => svv
           end select
        end if

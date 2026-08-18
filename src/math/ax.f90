@@ -52,7 +52,7 @@ module ax_product
      !! @param object The matrix-vector product type to be allocated.
      !! @param full_formulation Whether to use the formulation with the full
      !! viscous stress tensor, not assuming constant material properties.
-     !! @param svv Optional asymmetric SVV data.
+     !! @param svv Optional SVV object.
      module subroutine ax_helm_factory(object, full_formulation, svv)
        use spectral_vanishing_viscosity, only : svv_t
        class(ax_t), allocatable, intent(inout) :: object
