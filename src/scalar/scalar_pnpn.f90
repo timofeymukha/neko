@@ -193,7 +193,12 @@ contains
     call this%scheme_init(msh, coef, gs, params, scheme, user, rho)
 
     ! Setup backend dependent Ax routines
-    call ax_helm_factory(this%ax, full_formulation = .false.)
+    if (this%svv_enabled) then
+       call ax_helm_factory(this%ax, full_formulation = .false., &
+            svv = this%svv)
+    else
+       call ax_helm_factory(this%ax, full_formulation = .false.)
+    end if
 
     ! Setup backend dependent scalar residual routines
     call scalar_residual_factory(this%res)
@@ -448,6 +453,10 @@ contains
          call device_add2s2(s%x_d, ds%x_d, 1.0_rp, n)
       else
          call add2s2(s%x, ds%x, 1.0_rp, n)
+      end if
+
+      if (this%svv_enabled) then
+         call this%svv%update(rho, tstep)
       end if
 
     end associate

@@ -2,6 +2,9 @@
 
 ## Develop
 
+- Added the asymmetric spectral vanishing viscosity formulation for implicit
+  fluid and scalar solves, including the full-stress fluid operator, on CPU,
+  CUDA, and HIP backends.
 - The CUDA and HIP auto-tuners for `ax_helm` and the SEM operators (`opgrad`,
   `dudxyz`, `cdtp`, `conv1`, `convect_scalar`, `lambda2`) now also sweep the
   thread block geometry, not just the kernel formulation: chunk size for the

@@ -296,7 +296,12 @@ contains
 
     if (this%full_stress_formulation) then
        ! Setup backend dependent Ax routines
-       call ax_helm_factory(this%Ax_vel, full_formulation = .true.)
+       if (this%svv_enabled) then
+          call ax_helm_factory(this%Ax_vel, full_formulation = .true., &
+               svv = this%svv)
+       else
+          call ax_helm_factory(this%Ax_vel, full_formulation = .true.)
+       end if
 
        ! Setup backend dependent prs residual routines
        call pnpn_prs_res_stress_factory(this%prs_res)
@@ -305,7 +310,12 @@ contains
        call pnpn_vel_res_stress_factory(this%vel_res)
     else
        ! Setup backend dependent Ax routines
-       call ax_helm_factory(this%Ax_vel, full_formulation = .false.)
+       if (this%svv_enabled) then
+          call ax_helm_factory(this%Ax_vel, full_formulation = .false., &
+               svv = this%svv)
+       else
+          call ax_helm_factory(this%Ax_vel, full_formulation = .false.)
+       end if
 
        ! Setup backend dependent prs residual routines
        call pnpn_prs_res_factory(this%prs_res)
@@ -936,6 +946,10 @@ contains
               this%bclst_dw, this%bclst_vel_res, Ax_vel, Ax_prs, this%ksp_prs, &
               this%ksp_vel, this%pc_prs, this%pc_vel, this%ksp_prs%max_iter, &
               this%ksp_vel%max_iter)
+      end if
+
+      if (this%svv_enabled) then
+         call this%svv%update(rho, tstep)
       end if
 
       ! Update mesh velocities for ALE
