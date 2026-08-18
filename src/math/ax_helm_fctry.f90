@@ -66,34 +66,34 @@ contains
     end if
 
     if (full_formulation) then
-      if (NEKO_BCKND_SX .eq. 1 .or. NEKO_BCKND_XSMM .eq. 1) then
-         call neko_error("Full stress formulation is only available &
-                        &on the CPU and device")
-      else if (NEKO_BCKND_DEVICE .eq. 1) then
-         if (present(svv)) then
-            if (NEKO_BCKND_CUDA .ne. 1 .and. NEKO_BCKND_HIP .ne. 1) then
-               call neko_error("Full-stress SVV is only " // &
-                    "available on CPU, CUDA, and HIP backends")
-            end if
-            allocate(ax_helm_svv_KS_full_device_t::object)
-            select type (operator => object)
-            type is (ax_helm_svv_KS_full_device_t)
-               operator%svv => svv
-            end select
-         else
-            allocate(ax_helm_full_device_t::object)
-         end if
-      else
-         if (present(svv)) then
-            allocate(ax_helm_svv_KS_full_cpu_t::object)
-            select type (operator => object)
-            type is (ax_helm_svv_KS_full_cpu_t)
-               operator%svv => svv
-            end select
-         else
-            allocate(ax_helm_full_cpu_t::object)
-         end if
-      end if
+       if (NEKO_BCKND_SX .eq. 1 .or. NEKO_BCKND_XSMM .eq. 1) then
+          call neko_error("Full stress formulation is only available &
+          &on the CPU and device")
+       else if (NEKO_BCKND_DEVICE .eq. 1) then
+          if (present(svv)) then
+             if (NEKO_BCKND_CUDA .ne. 1 .and. NEKO_BCKND_HIP .ne. 1) then
+                call neko_error("Full-stress SVV is only " // &
+                     "available on CPU, CUDA, and HIP backends")
+             end if
+             allocate(ax_helm_svv_KS_full_device_t::object)
+             select type (operator => object)
+             type is (ax_helm_svv_KS_full_device_t)
+                operator%svv => svv
+             end select
+          else
+             allocate(ax_helm_full_device_t::object)
+          end if
+       else
+          if (present(svv)) then
+             allocate(ax_helm_svv_KS_full_cpu_t::object)
+             select type (operator => object)
+             type is (ax_helm_svv_KS_full_cpu_t)
+                operator%svv => svv
+             end select
+          else
+             allocate(ax_helm_full_cpu_t::object)
+          end if
+       end if
     else if (present(svv)) then
        if (NEKO_BCKND_SX .eq. 1 .or. NEKO_BCKND_XSMM .eq. 1) then
           call neko_error("SVV is not available with the SX or " // &
