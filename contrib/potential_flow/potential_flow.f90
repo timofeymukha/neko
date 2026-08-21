@@ -48,6 +48,7 @@ program potential_flow
   use jacobi, only : jacobi_t
   use sx_jacobi, only : sx_jacobi_t
   use device_jacobi, only : device_jacobi_t
+  use phmg, only : phmg_t
   use precon, only : pc_t, precon_allocator, precon_destroy
   use field_math, only : field_glsum
   use vector_math, only : vector_vdot3, vector_masked_gather_copy_0, &
@@ -77,7 +78,7 @@ program potential_flow
   character(len=:), allocatable :: scheme
   character(len=LOG_SIZE) :: log_buf
   character(len=80) :: suffix
-  type(json_file) :: params, time_params
+  type(json_file) :: params, time_params, precon_params
   type(mesh_t) :: msh
   type(file_t) :: mesh_file, output_file
   type(space_t) :: Xh
@@ -99,7 +100,7 @@ program potential_flow
   real(kind=rp) :: tolerance
   real(kind=rp) :: net_flux, abs_flux
   real(kind=rp) :: div_l2, div_linf
-  logical :: cyclic, has_dirichlet
+  logical :: cyclic, has_dirichlet, using_phmg
 
   call neko_init()
   argc = command_argument_count()
@@ -175,7 +176,8 @@ program potential_flow
   net_flux = field_glsum(rhs, n)
   abs_flux = global_absolute_sum(rhs, work, n)
 
-  write(log_buf, '(A,ES13.5)') "Net prescribed boundary flux: ", net_flux
+  write(log_buf, '(A,ES13.5)') &
+       "Integrated prescribed Neumann flux: ", net_flux
   call neko_log%message(log_buf)
 
   if (.not. has_dirichlet) then
@@ -205,10 +207,23 @@ program potential_flow
   call ax_helm_factory(Ax, full_formulation = .false.)
 
   max_iter = 5000
-  tolerance = 1.0e-8_rp
-  call initialize_preconditioner(preconditioner, coef, dm, gs)
-  call krylov_solver_factory(solver, n, "cg", max_iter, &
+  call json_get_or_lookup(params, &
+       "case.fluid.pressure_solver.absolute_tolerance", tolerance)
+  call json_get(params, "case.fluid.pressure_solver.preconditioner", &
+       precon_params)
+  call initialize_preconditioner(preconditioner, coef, potential_bcs, &
+       precon_params, dm, gs, using_phmg)
+  call krylov_solver_factory(solver, n, "gmres", max_iter, &
        abstol = tolerance, M = preconditioner, monitor = .false.)
+
+  if (using_phmg) then
+     call neko_log%message("Potential solver: GMRES with PHMG")
+  else
+     call neko_log%message("Potential solver: GMRES with Jacobi " // &
+          "(small-mesh fallback)")
+  end if
+  write(log_buf, '(A,ES13.5)') "Potential solver tolerance: ", tolerance
+  call neko_log%message(log_buf)
 
   phi = 0.0_rp
   monitor = solver%solve(Ax, phi, rhs%x, n, coef, potential_bcs, gs)
@@ -525,24 +540,39 @@ contains
     bc_object%zone_indices = zones
   end subroutine mark_zones
 
-  !> Initialize a Jacobi preconditioner for the configured backend.
-  subroutine initialize_preconditioner(pc, c, dof, gather_scatter)
+  !> Initialize PHMG, with a Jacobi fallback for degenerate coarse meshes.
+  subroutine initialize_preconditioner(pc, c, bcs, pc_params, dof, &
+       gather_scatter, using_phmg)
     class(pc_t), allocatable, target, intent(inout) :: pc
     type(coef_t), target, intent(in) :: c
+    type(bc_list_t), target, intent(inout) :: bcs
+    type(json_file), intent(inout) :: pc_params
     type(dofmap_t), target, intent(in) :: dof
     type(gs_t), target, intent(inout) :: gather_scatter
+    logical, intent(out) :: using_phmg
 
-    call precon_allocator(pc, "jacobi")
-    select type (jacobi => pc)
-    type is (jacobi_t)
-       call jacobi%init(c, dof, gather_scatter)
-    type is (sx_jacobi_t)
-       call jacobi%init(c, dof, gather_scatter)
-    type is (device_jacobi_t)
-       call jacobi%init(c, dof, gather_scatter)
-    class default
-       call neko_error("Unable to initialize the Jacobi preconditioner")
-    end select
+    using_phmg = c%msh%glb_nelv .gt. pe_size
+    if (using_phmg) then
+       call precon_allocator(pc, "phmg")
+       select type (multigrid => pc)
+       type is (phmg_t)
+          call multigrid%init(c, bcs, pc_params)
+       class default
+          call neko_error("Unable to initialize the PHMG preconditioner")
+       end select
+    else
+       call precon_allocator(pc, "jacobi")
+       select type (jacobi => pc)
+       type is (jacobi_t)
+          call jacobi%init(c, dof, gather_scatter)
+       type is (sx_jacobi_t)
+          call jacobi%init(c, dof, gather_scatter)
+       type is (device_jacobi_t)
+          call jacobi%init(c, dof, gather_scatter)
+       class default
+          call neko_error("Unable to initialize the Jacobi preconditioner")
+       end select
+    end if
   end subroutine initialize_preconditioner
 
   !> Remove the constant null-space component on the active backend.
