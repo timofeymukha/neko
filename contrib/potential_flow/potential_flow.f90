@@ -284,7 +284,8 @@ program potential_flow
        " iterations, residual ", monitor%res_final
   call neko_log%message(log_buf)
   if (.not. monitor%converged) then
-     call neko_error("Potential solve did not converge")
+     call neko_warning("Potential solve did not converge; " // &
+          "writing the current iterate")
   end if
   if (.not. has_dirichlet) then
      call orthogonalize_field(phi, glb_n_points, n)
