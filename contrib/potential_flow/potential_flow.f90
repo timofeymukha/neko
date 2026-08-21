@@ -46,6 +46,16 @@ program potential_flow
   use num_types, only : i8
   use operators, only : rotate_cyc
   use jacobi, only : jacobi_t
+  use sx_jacobi, only : sx_jacobi_t
+  use device_jacobi, only : device_jacobi_t
+  use precon, only : pc_t, precon_allocator, precon_destroy
+  use field_math, only : field_glsum
+  use vector_math, only : vector_vdot3, vector_masked_gather_copy_0, &
+       vector_face_masked_gather_copy_0
+  use opr_device, only : device_ortho
+  use device, only : DEVICE_TO_HOST, device_sync
+  use device_math, only : device_absval, device_add2, device_cfill, &
+       device_col2, device_copy, device_glmax, device_glsc3, device_glsum
   use fld_file, only : fld_file_t
   use mpi_f08
   implicit none
@@ -74,7 +84,6 @@ program potential_flow
   type(dofmap_t), target :: dm
   type(gs_t), target :: gs
   type(coef_t), target :: coef
-  type(jacobi_t), target :: preconditioner
   type(field_t), target :: phi, rhs, p, u, v, w, div_u, work
   type(field_list_t) :: output_fields
   type(time_state_t) :: time
@@ -82,6 +91,7 @@ program potential_flow
   type(potential_boundary_t), allocatable, target :: boundaries(:)
   class(ax_t), allocatable :: Ax
   class(ksp_t), allocatable :: solver
+  class(pc_t), allocatable, target :: preconditioner
   type(ksp_monitor_t) :: monitor
   integer :: argc, polynomial_order, lx, n
   integer :: i, max_iter
@@ -98,10 +108,6 @@ program potential_flow
      call usage()
      call neko_finalize()
      stop
-  end if
-
-  if (NEKO_BCKND_DEVICE .eq. 1) then
-     call neko_error("potential_flow currently supports CPU backends only")
   end if
 
   call get_command_argument(1, case_fname)
@@ -164,10 +170,10 @@ program potential_flow
   call setup_boundaries(params, coef, time, boundaries, potential_bcs, &
        flux_bcs, velocity_bcs, has_dirichlet)
 
-  rhs%x = 0.0_rp
+  rhs = 0.0_rp
   call flux_bcs%apply_scalar(rhs%x, n, time, strong = .false.)
-  net_flux = glsum(rhs%x, n)
-  abs_flux = global_absolute_sum(rhs%x, n)
+  net_flux = field_glsum(rhs, n)
+  abs_flux = global_absolute_sum(rhs, work, n)
 
   write(log_buf, '(A,ES13.5)') "Net prescribed boundary flux: ", net_flux
   call neko_log%message(log_buf)
@@ -181,24 +187,30 @@ program potential_flow
              ", tolerance ", tolerance
         call neko_error(trim(log_buf))
      end if
-     call ortho(rhs%x, glb_n_points, n)
+     call orthogonalize_field(rhs, glb_n_points, n)
   end if
 
   call gs%op(rhs, GS_OP_ADD)
+  if (NEKO_BCKND_DEVICE .eq. 1) call device_sync()
   call potential_bcs%apply_scalar(rhs%x, n)
 
-  coef%h1 = 1.0_rp
-  coef%h2 = 0.0_rp
+  if (NEKO_BCKND_DEVICE .eq. 1) then
+     call device_cfill(coef%h1_d, 1.0_rp, n)
+     call device_cfill(coef%h2_d, 0.0_rp, n)
+  else
+     coef%h1 = 1.0_rp
+     coef%h2 = 0.0_rp
+  end if
   coef%ifh2 = .false.
   call ax_helm_factory(Ax, full_formulation = .false.)
 
   max_iter = 5000
   tolerance = 1.0e-8_rp
-  call preconditioner%init(coef, dm, gs)
+  call initialize_preconditioner(preconditioner, coef, dm, gs)
   call krylov_solver_factory(solver, n, "cg", max_iter, &
        abstol = tolerance, M = preconditioner, monitor = .false.)
 
-  phi%x = 0.0_rp
+  phi = 0.0_rp
   monitor = solver%solve(Ax, phi, rhs%x, n, coef, potential_bcs, gs)
   write(log_buf, '(A,I0,A,ES13.5)') "Potential solve: ", monitor%iter, &
        " iterations, residual ", monitor%res_final
@@ -206,15 +218,24 @@ program potential_flow
   if (.not. monitor%converged) then
      call neko_error("Potential solve did not converge")
   end if
-  if (.not. has_dirichlet) call ortho(phi%x, glb_n_points, n)
+  if (.not. has_dirichlet) then
+     call orthogonalize_field(phi, glb_n_points, n)
+  end if
 
   call opgrad(u%x, v%x, w%x, phi%x, coef)
   call rotate_cyc(u, v, w, 1, coef)
   call gs%op(u%x, v%x, w%x, n, GS_OP_ADD)
+  if (NEKO_BCKND_DEVICE .eq. 1) call device_sync()
   call rotate_cyc(u, v, w, 0, coef)
-  call col2(u%x, coef%Binv, n)
-  call col2(v%x, coef%Binv, n)
-  call col2(w%x, coef%Binv, n)
+  if (NEKO_BCKND_DEVICE .eq. 1) then
+     call device_col2(u%x_d, coef%Binv_d, n)
+     call device_col2(v%x_d, coef%Binv_d, n)
+     call device_col2(w%x_d, coef%Binv_d, n)
+  else
+     call col2(u%x, coef%Binv, n)
+     call col2(v%x, coef%Binv, n)
+     call col2(w%x, coef%Binv, n)
+  end if
 
   call divergence_norms(div_l2, div_linf, div_u, work, u, v, w, &
        coef, n)
@@ -222,15 +243,14 @@ program potential_flow
        "Projected velocity divergence: L2 ", div_l2, ", Linf ", div_linf
   call neko_log%message(log_buf)
 
-  call velocity_bcs%apply_vector(u%x, v%x, w%x, n, time, &
-       strong = .true.)
+  call velocity_bcs%apply_vector_field(u, v, w, time = time, strong = .true.)
   call divergence_norms(div_l2, div_linf, div_u, work, u, v, w, &
        coef, n)
   write(log_buf, '(A,ES13.5,A,ES13.5)') &
        "After velocity BCs: divergence L2 ", div_l2, ", Linf ", div_linf
   call neko_log%message(log_buf)
 
-  p%x = 0.0_rp
+  p = 0.0_rp
   call output_fields%init(4)
   call output_fields%assign_to_field(1, p)
   call output_fields%assign_to_field(2, u)
@@ -242,6 +262,9 @@ program potential_flow
      fld%skip_pressure = .false.
      fld%skip_velocity = .false.
   end select
+  if (NEKO_BCKND_DEVICE .eq. 1) then
+     call output_fields%copy_from(DEVICE_TO_HOST, .true.)
+  end if
   call output_file%write(output_fields, time%t)
   call output_file%free()
   call output_fields%free()
@@ -265,7 +288,8 @@ program potential_flow
 
   call solver%free()
   deallocate(solver)
-  call preconditioner%free()
+  call precon_destroy(preconditioner)
+  deallocate(preconditioner)
   deallocate(Ax)
   call work%free()
   call div_u%free()
@@ -501,44 +525,100 @@ contains
     bc_object%zone_indices = zones
   end subroutine mark_zones
 
+  !> Initialize a Jacobi preconditioner for the configured backend.
+  subroutine initialize_preconditioner(pc, c, dof, gather_scatter)
+    class(pc_t), allocatable, target, intent(inout) :: pc
+    type(coef_t), target, intent(in) :: c
+    type(dofmap_t), target, intent(in) :: dof
+    type(gs_t), target, intent(inout) :: gather_scatter
+
+    call precon_allocator(pc, "jacobi")
+    select type (jacobi => pc)
+    type is (jacobi_t)
+       call jacobi%init(c, dof, gather_scatter)
+    type is (sx_jacobi_t)
+       call jacobi%init(c, dof, gather_scatter)
+    type is (device_jacobi_t)
+       call jacobi%init(c, dof, gather_scatter)
+    class default
+       call neko_error("Unable to initialize the Jacobi preconditioner")
+    end select
+  end subroutine initialize_preconditioner
+
+  !> Remove the constant null-space component on the active backend.
+  subroutine orthogonalize_field(x, global_size, local_size)
+    type(field_t), intent(inout) :: x
+    integer(kind=i8), intent(in) :: global_size
+    integer, intent(in) :: local_size
+
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_ortho(x%x_d, global_size, local_size)
+    else
+       call ortho(x%x, global_size, local_size)
+    end if
+  end subroutine orthogonalize_field
+
   !> Evaluate a prescribed velocity and set its normal potential flux.
   subroutine set_normal_flux(boundary, c, time_state)
     type(potential_boundary_t), intent(inout) :: boundary
-    type(coef_t), intent(in) :: c
+    type(coef_t), target, intent(in) :: c
     type(time_state_t), intent(in) :: time_state
     type(field_t) :: bx, by, bz
-    type(vector_t) :: normal_flux
-    real(kind=rp) :: normal(3)
-    integer :: i, k, facet, idx(4), n_local
+    type(vector_t) :: bx_surface, by_surface, bz_surface, normal_flux
+    type(vector_t) :: normal_x, normal_y, normal_z
+    integer :: n_boundary, n_local
 
     if (.not. boundary%neumann) return
 
     call bx%init(c%dof, "boundary_u")
     call by%init(c%dof, "boundary_v")
     call bz%init(c%dof, "boundary_w")
-    bx%x = 0.0_rp
-    by%x = 0.0_rp
-    bz%x = 0.0_rp
+    bx = 0.0_rp
+    by = 0.0_rp
+    bz = 0.0_rp
+
+    call boundary%velocity_bc%apply_vector_generic(bx, by, bz, &
+         time = time_state, strong = .true.)
 
     n_local = c%dof%size()
-    !$omp parallel
-    call boundary%velocity_bc%apply_vector(bx%x, by%x, bz%x, n_local, &
-         time_state, strong = .true.)
-    !$omp end parallel
+    n_boundary = boundary%flux_bc%msk(0)
+    call bx_surface%init(n_boundary)
+    call by_surface%init(n_boundary)
+    call bz_surface%init(n_boundary)
+    call normal_x%init(n_boundary)
+    call normal_y%init(n_boundary)
+    call normal_z%init(n_boundary)
+    call normal_flux%init(n_boundary)
 
-    call normal_flux%init(boundary%flux_bc%msk(0))
-    do i = 1, boundary%flux_bc%msk(0)
-       k = boundary%flux_bc%msk(i)
-       facet = boundary%flux_bc%facet(i)
-       idx = nonlinear_index(k, c%Xh%lx, c%Xh%ly, c%Xh%lz)
-       normal = c%get_normal(idx(1), idx(2), idx(3), idx(4), facet)
-       normal_flux%x(i) = bx%x(k, 1, 1, 1) * normal(1) + &
-            by%x(k, 1, 1, 1) * normal(2) + &
-            bz%x(k, 1, 1, 1) * normal(3)
-    end do
+    if (n_boundary .gt. 0) then
+       call vector_masked_gather_copy_0(bx_surface, bx%x, &
+            boundary%flux_bc%msk, n_local, n_boundary)
+       call vector_masked_gather_copy_0(by_surface, by%x, &
+            boundary%flux_bc%msk, n_local, n_boundary)
+       call vector_masked_gather_copy_0(bz_surface, bz%x, &
+            boundary%flux_bc%msk, n_local, n_boundary)
+       call vector_face_masked_gather_copy_0(normal_x, c%nx, &
+            boundary%flux_bc%msk, boundary%flux_bc%facet, &
+            c%Xh%lx, c%Xh%ly, c%Xh%lz, n_boundary)
+       call vector_face_masked_gather_copy_0(normal_y, c%ny, &
+            boundary%flux_bc%msk, boundary%flux_bc%facet, &
+            c%Xh%lx, c%Xh%ly, c%Xh%lz, n_boundary)
+       call vector_face_masked_gather_copy_0(normal_z, c%nz, &
+            boundary%flux_bc%msk, boundary%flux_bc%facet, &
+            c%Xh%lx, c%Xh%ly, c%Xh%lz, n_boundary)
+       call vector_vdot3(normal_flux, bx_surface, by_surface, bz_surface, &
+            normal_x, normal_y, normal_z)
+    end if
     call boundary%flux_bc%set_flux(normal_flux, 1)
 
+    if (NEKO_BCKND_DEVICE .eq. 1) call device_sync()
     call normal_flux%free()
+    call normal_z%free()
+    call normal_y%free()
+    call normal_x%free()
+    call bz_surface%free()
+    call by_surface%free()
+    call bx_surface%free()
     call bz%free()
     call by%free()
     call bx%free()
@@ -555,29 +635,51 @@ contains
     real(kind=rp) :: local_max
     integer :: ierr
 
-    call dudxyz(divergence%x, ux%x, c%drdx, c%dsdx, c%dtdx, c)
-    call dudxyz(scratch%x, uy%x, c%drdy, c%dsdy, c%dtdy, c)
-    call add2(divergence%x, scratch%x, n_local)
-    call dudxyz(scratch%x, uz%x, c%drdz, c%dsdz, c%dtdz, c)
-    call add2(divergence%x, scratch%x, n_local)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call dudxyz(divergence%x_d, ux%x_d, c%drdx_d, c%dsdx_d, &
+            c%dtdx_d, c)
+       call dudxyz(scratch%x_d, uy%x_d, c%drdy_d, c%dsdy_d, c%dtdy_d, c)
+       call device_add2(divergence%x_d, scratch%x_d, n_local)
+       call dudxyz(scratch%x_d, uz%x_d, c%drdz_d, c%dsdz_d, c%dtdz_d, c)
+       call device_add2(divergence%x_d, scratch%x_d, n_local)
 
-    l2_norm = sqrt(glsc3(divergence%x, c%B, divergence%x, n_local) / &
-         c%volume)
-    local_max = maxval(abs(divergence%x))
-    call MPI_Allreduce(local_max, max_norm, 1, MPI_REAL_PRECISION, &
-         MPI_MAX, NEKO_COMM, ierr)
+       l2_norm = sqrt(device_glsc3(divergence%x_d, c%B_d, &
+            divergence%x_d, n_local) / c%volume)
+       call device_copy(scratch%x_d, divergence%x_d, n_local)
+       call device_absval(scratch%x_d, n_local)
+       max_norm = device_glmax(scratch%x_d, n_local)
+    else
+       call dudxyz(divergence%x, ux%x, c%drdx, c%dsdx, c%dtdx, c)
+       call dudxyz(scratch%x, uy%x, c%drdy, c%dsdy, c%dtdy, c)
+       call add2(divergence%x, scratch%x, n_local)
+       call dudxyz(scratch%x, uz%x, c%drdz, c%dsdz, c%dtdz, c)
+       call add2(divergence%x, scratch%x, n_local)
+
+       l2_norm = sqrt(glsc3(divergence%x, c%B, divergence%x, n_local) / &
+            c%volume)
+       local_max = maxval(abs(divergence%x))
+       call MPI_Allreduce(local_max, max_norm, 1, MPI_REAL_PRECISION, &
+            MPI_MAX, NEKO_COMM, ierr)
+    end if
   end subroutine divergence_norms
 
-  !> Compute the global one-norm of an array.
-  function global_absolute_sum(x, n_local) result(value)
+  !> Compute the global one-norm of a field.
+  function global_absolute_sum(x, scratch, n_local) result(value)
     integer, intent(in) :: n_local
-    real(kind=rp), intent(in) :: x(n_local)
+    type(field_t), intent(in) :: x
+    type(field_t), intent(inout) :: scratch
     real(kind=rp) :: value, local_value
     integer :: ierr
 
-    local_value = sum(abs(x))
-    call MPI_Allreduce(local_value, value, 1, MPI_REAL_PRECISION, &
-         MPI_SUM, NEKO_COMM, ierr)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_copy(scratch%x_d, x%x_d, n_local)
+       call device_absval(scratch%x_d, n_local)
+       value = device_glsum(scratch%x_d, n_local)
+    else
+       local_value = sum(abs(x%x))
+       call MPI_Allreduce(local_value, value, 1, MPI_REAL_PRECISION, &
+            MPI_SUM, NEKO_COMM, ierr)
+    end if
   end function global_absolute_sum
 
 end program potential_flow

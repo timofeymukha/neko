@@ -42,11 +42,12 @@ Supported boundary mappings are:
 - Zero Dirichlet potential: pressure and outflow variants.
 
 Moving walls, `user_velocity`, and `overset_interface` require runtime user
-data and are rejected. The current implementation supports CPU backends. For a
-pure-Neumann problem, the prescribed total flux must be compatible; the
-utility diagnoses and rejects a nonzero net flux. A fully periodic domain has
-no way to infer a nonzero mean velocity and therefore produces the zero-flow
-solution.
+data and are rejected. CPU and configured Neko device backends are supported;
+the potential solve, gradient projection, boundary application, and diagnostics
+remain on the device until the result is copied to the host for output. For a
+pure-Neumann problem, the prescribed total flux must be compatible; the utility
+diagnoses and rejects a nonzero net flux. A fully periodic domain has no way to
+infer a nonzero mean velocity and therefore produces the zero-flow solution.
 
 The field pressure is initialized to zero. The utility reports the potential
 solver residual, total prescribed flux, and velocity-divergence norms before
