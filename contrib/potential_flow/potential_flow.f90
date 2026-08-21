@@ -125,26 +125,10 @@ program potential_flow
   call params%load_file(filename = trim(case_fname))
   call load_case_constants(params)
 
-  call json_get(params, "case.fluid.scheme", scheme)
-  if (trim(scheme) .ne. "pnpn") then
-     call neko_error("potential_flow supports the incompressible pnpn " // &
-          "scheme only")
-  end if
+  call json_get(config, "mesh_file", mesh_setting)
+  mesh_fname = relative_to_file(config_fname, mesh_setting)
 
-  if (config%valid_path("mesh_file")) then
-     call json_get(config, "mesh_file", mesh_setting)
-     mesh_fname = relative_to_file(config_fname, mesh_setting)
-  else
-     call json_get(params, "case.mesh_file", mesh_setting)
-     mesh_fname = relative_to_file(case_fname, mesh_setting)
-  end if
-
-  if (config%valid_path("polynomial_order")) then
-     call json_get_or_lookup(config, "polynomial_order", polynomial_order)
-  else
-     call json_get_or_lookup(params, "case.numerics.polynomial_order", &
-          polynomial_order)
-  end if
+  call json_get_or_lookup(config, "polynomial_order", polynomial_order)
   lx = polynomial_order + 1
 
   call json_get(params, "case.time", time_params)
@@ -176,10 +160,8 @@ program potential_flow
   call coef%init(gs)
 
   cyclic = .false.
-  call json_get_or_default(params, "case.fluid.cyclic", cyclic, .false.)
-  if (config%valid_path("cyclic")) then
-     call json_get(config, "cyclic", cyclic)
-  end if
+  call json_get_or_default(config, "cyclic", cyclic, .false.)
+
   coef%cyclic = cyclic
   call coef%generate_cyclic_bc()
 
@@ -194,17 +176,10 @@ program potential_flow
   n = dm%size()
   glb_n_points = int(msh%glb_nelv, i8) * int(Xh%lxyz, i8)
 
-  if (config%valid_path("boundary_conditions")) then
-     boundary_path = "boundary_conditions"
-     call neko_log%message("Boundary conditions: configuration override")
-     call setup_boundaries(config, boundary_path, coef, time, boundaries, &
-          potential_bcs, flux_bcs, velocity_bcs, has_dirichlet)
-  else
-     boundary_path = "case.fluid.boundary_conditions"
-     call neko_log%message("Boundary conditions: referenced case")
-     call setup_boundaries(params, boundary_path, coef, time, boundaries, &
-          potential_bcs, flux_bcs, velocity_bcs, has_dirichlet)
-  end if
+  boundary_path = "boundary_conditions"
+  call neko_log%message("Boundary conditions: configuration override")
+  call setup_boundaries(config, boundary_path, coef, time, boundaries, &
+       potential_bcs, flux_bcs, velocity_bcs, has_dirichlet)
 
   rhs = 0.0_rp
   call flux_bcs%apply_scalar(rhs%x, n, time, strong = .false.)
