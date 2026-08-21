@@ -1,7 +1,11 @@
 {
   "version": 1.0,
   "case_file": "case.json",
+  "mesh_file": "mesh.nmsh",
+  "polynomial_order": 3,
   "output_filename": "potential_flow.fld",
+  "background_velocity": [1.0, 0.0, 0.0],
+  "boundary_conditions": [],
   "solver": {
     "type": "gmres",
     "preconditioner": {

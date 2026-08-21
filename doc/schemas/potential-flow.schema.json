@@ -6,6 +6,9 @@
   "required": [
     "version",
     "case_file",
+    "mesh_file",
+    "polynomial_order",
+    "boundary_conditions",
     "solver"
   ],
   "properties": {
@@ -28,6 +31,9 @@
     },
     "evaluation_time": {
       "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+    },
+    "background_velocity": {
+      "$ref": "urn:neko:schema:common#/$defs/vector3OrRef"
     },
     "cyclic": {
       "type": "boolean"

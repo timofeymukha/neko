@@ -52,9 +52,9 @@ program potential_flow
   use hsmg, only : hsmg_t
   use phmg, only : phmg_t
   use precon, only : pc_t, precon_allocator, precon_destroy
-  use field_math, only : field_glsum
-  use vector_math, only : vector_vdot3, vector_masked_gather_copy_0, &
-       vector_face_masked_gather_copy_0
+  use field_math, only : field_cadd, field_glsum
+  use vector_math, only : vector_cadd, vector_vdot3, &
+       vector_masked_gather_copy_0, vector_face_masked_gather_copy_0
   use opr_device, only : device_ortho
   use device, only : DEVICE_TO_HOST, device_sync
   use device_math, only : device_absval, device_add2, device_cfill, &
@@ -101,6 +101,7 @@ program potential_flow
   integer :: argc, polynomial_order, lx, n
   integer :: i, max_iter
   integer(kind=i8) :: glb_n_points
+  real(kind=rp), allocatable :: background_velocity(:)
   real(kind=rp) :: tolerance, relative_tolerance
   real(kind=rp) :: net_flux, abs_flux
   real(kind=rp) :: div_l2, div_linf
@@ -176,10 +177,25 @@ program potential_flow
   n = dm%size()
   glb_n_points = int(msh%glb_nelv, i8) * int(Xh%lxyz, i8)
 
+  if (config%valid_path("background_velocity")) then
+     call json_get_or_lookup(config, "background_velocity", &
+          background_velocity)
+     if (size(background_velocity) .ne. 3) then
+        call neko_error("background_velocity must contain three components")
+     end if
+  else
+     allocate(background_velocity(3))
+     background_velocity = 0.0_rp
+  end if
+  write(log_buf, '(A,3(ES13.5,1X))') "Background velocity: ", &
+       background_velocity
+  call neko_log%message(log_buf)
+
   boundary_path = "boundary_conditions"
   call neko_log%message("Boundary conditions: configuration override")
   call setup_boundaries(config, boundary_path, coef, time, boundaries, &
-       potential_bcs, flux_bcs, velocity_bcs, has_dirichlet)
+       potential_bcs, flux_bcs, velocity_bcs, background_velocity, &
+       has_dirichlet)
 
   rhs = 0.0_rp
   call flux_bcs%apply_scalar(rhs%x, n, time, strong = .false.)
@@ -187,7 +203,7 @@ program potential_flow
   abs_flux = global_absolute_sum(rhs, work, n)
 
   write(log_buf, '(A,ES13.5)') &
-       "Integrated prescribed Neumann flux: ", net_flux
+       "Integrated prescribed Neumann correction flux: ", net_flux
   call neko_log%message(log_buf)
 
   if (.not. has_dirichlet) then
@@ -281,6 +297,10 @@ program potential_flow
      call col2(w%x, coef%Binv, n)
   end if
 
+  call field_cadd(u, background_velocity(1), n)
+  call field_cadd(v, background_velocity(2), n)
+  call field_cadd(w, background_velocity(3), n)
+
   call divergence_norms(div_l2, div_linf, div_u, work, u, v, w, &
        coef, n)
   write(log_buf, '(A,ES13.5,A,ES13.5)') &
@@ -336,6 +356,7 @@ program potential_flow
   deallocate(preconditioner)
   deallocate(Ax)
   call work%free()
+  deallocate(background_velocity)
   call div_u%free()
   call w%free()
   call v%free()
@@ -422,7 +443,8 @@ contains
 
   !> Construct potential and velocity boundary conditions from JSON.
   subroutine setup_boundaries(boundary_params, path, c, time_state, boundary, &
-       phi_list, flux_list, velocity_list, any_dirichlet)
+       phi_list, flux_list, velocity_list, background_velocity, &
+       any_dirichlet)
     type(json_file), intent(inout) :: boundary_params
     character(len=*), intent(in) :: path
     type(coef_t), target, intent(in) :: c
@@ -431,6 +453,7 @@ contains
     type(bc_list_t), intent(inout) :: phi_list
     type(bc_list_t), intent(inout) :: flux_list
     type(bc_list_t), intent(inout) :: velocity_list
+    real(kind=rp), intent(in) :: background_velocity(3)
     logical, intent(out) :: any_dirichlet
     type(json_core) :: core
     type(json_value), pointer :: bc_array
@@ -454,7 +477,7 @@ contains
 
     if (n_bcs .eq. 0) then
        call neko_warning("No fluid boundary conditions found; the " // &
-            "potential-flow velocity will be zero")
+            "disturbance-potential correction will be zero")
        deallocate(marked_zones)
        return
     end if
@@ -507,7 +530,10 @@ contains
                boundary(i)%zone_indices)
           call boundary(i)%velocity_bc%finalize()
           call velocity_list%append(boundary(i)%velocity_bc)
-          call set_normal_flux(boundary(i), c, time_state)
+       end if
+       if (boundary(i)%neumann) then
+          call set_normal_flux(boundary(i), c, time_state, &
+               background_velocity)
        end if
     end do
 
@@ -628,11 +654,12 @@ contains
     end if
   end subroutine orthogonalize_field
 
-  !> Evaluate a prescribed velocity and set its normal potential flux.
-  subroutine set_normal_flux(boundary, c, time_state)
+  !> Set the normal disturbance-potential flux from the velocity difference.
+  subroutine set_normal_flux(boundary, c, time_state, background_velocity)
     type(potential_boundary_t), intent(inout) :: boundary
     type(coef_t), target, intent(in) :: c
     type(time_state_t), intent(in) :: time_state
+    real(kind=rp), intent(in) :: background_velocity(3)
     type(field_t) :: bx, by, bz
     type(vector_t) :: bx_surface, by_surface, bz_surface, normal_flux
     type(vector_t) :: normal_x, normal_y, normal_z
@@ -647,8 +674,10 @@ contains
     by = 0.0_rp
     bz = 0.0_rp
 
-    call boundary%velocity_bc%apply_vector_generic(bx, by, bz, &
-         time = time_state, strong = .true.)
+    if (allocated(boundary%velocity_bc)) then
+       call boundary%velocity_bc%apply_vector_generic(bx, by, bz, &
+            time = time_state, strong = .true.)
+    end if
 
     n_local = c%dof%size()
     n_boundary = boundary%flux_bc%msk(0)
@@ -676,6 +705,9 @@ contains
        call vector_face_masked_gather_copy_0(normal_z, c%nz, &
             boundary%flux_bc%msk, boundary%flux_bc%facet, &
             c%Xh%lx, c%Xh%ly, c%Xh%lz, n_boundary)
+       call vector_cadd(bx_surface, -background_velocity(1), n_boundary)
+       call vector_cadd(by_surface, -background_velocity(2), n_boundary)
+       call vector_cadd(bz_surface, -background_velocity(3), n_boundary)
        call vector_vdot3(normal_flux, bx_surface, by_surface, bz_surface, &
             normal_x, normal_y, normal_z)
     end if
