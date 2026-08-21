@@ -6,11 +6,63 @@ approximately divergence-free initial condition before starting an
 incompressible `pnpn` simulation.
 
 ```console
-potential_flow case.case [output.fld]
+potential_flow potential_flow.json
 ```
 
-The default output name is `potential_flow.fld`. As with other Neko field
-writers, this creates a field series such as `potential_flow0.nek5000` and
+The argument is a standalone initializer configuration. It references the Neko
+case but owns the potential solver settings, so changing the simulation's
+pressure solver does not change the generated initial condition.
+
+```json
+{
+  "version": 1.0,
+  "case_file": "pseudo2d_5e.json",
+  "mesh_file": "mesh.nmsh",
+  "polynomial_order": 3,
+  "output_filename": "potential_flow.fld",
+  "evaluation_time": 0.0,
+  "solver": {
+    "type": "gmres",
+    "preconditioner": {
+      "type": "phmg"
+    },
+    "absolute_tolerance": 1e-6,
+    "max_iterations": 500,
+    "monitor": true
+  }
+}
+```
+
+`version`, `case_file`, and `solver` are required. The `solver` object uses the
+same schema as a Neko linear solver. In particular, all PHMG or HSMG parameters
+are placed inside `solver.preconditioner` in the usual form. If omitted,
+`solver.max_iterations` defaults to 5000 and `solver.monitor` to `false`.
+Absolute and optional relative tolerances are both honored. Projection-space
+settings are not used because the initializer performs only one solve.
+
+The following values can be omitted and are then inherited from the referenced
+case: `mesh_file`, `polynomial_order`, `cyclic`, and `boundary_conditions`.
+`evaluation_time` defaults to the case start time and controls the evaluation
+of time-dependent boundary expressions. `output_filename` defaults to
+`potential_flow.fld`. Paths written in the initializer configuration are
+relative to that file; paths inherited from the Neko case remain relative to
+the case file.
+
+An optional `boundary_conditions` array replaces the complete
+`case.fluid.boundary_conditions` array. It uses the standard Neko pnpn boundary
+condition schema, though the unsupported runtime-user boundary types listed
+below are still rejected by the utility.
+
+The configuration can be checked against
+`doc/schemas/potential-flow.schema.json`:
+
+```console
+python contrib/validate_case_schema.py \
+  --schema doc/schemas/potential-flow.schema.json potential_flow.json
+```
+
+As with other Neko field writers, an output name of `potential_flow.fld`
+creates a field series such as `potential_flow0.nek5000` and
 `potential_flow0.f00000`. Point the case's field initial condition at the first
 data file, for example:
 
@@ -27,12 +79,9 @@ The utility solves
   \nabla^2 \phi = 0, \qquad \mathbf{u} = \nabla \phi.
 \]
 
-The potential equation is solved with GMRES and a PHMG preconditioner. PHMG
-uses the settings in `case.fluid.pressure_solver.preconditioner`, while the
-convergence tolerance is inherited from
-`case.fluid.pressure_solver.absolute_tolerance`. A mesh with no more than one
-element per MPI rank falls back to Jacobi because it cannot form a valid PHMG
-coarse hierarchy.
+The potential equation uses the solver and preconditioner selected in the
+initializer configuration. The available scalar Krylov solvers and
+preconditioners are the same backend-specific implementations used by Neko.
 
 Velocity-prescribed boundaries provide the Neumann condition
 `d(phi)/dn = u_boundary . n`. Pressure/outflow boundaries set `phi = 0`; the

@@ -1,0 +1,14 @@
+{
+  "version": 1.0,
+  "case_file": "case.json",
+  "output_filename": "potential_flow.fld",
+  "solver": {
+    "type": "gmres",
+    "preconditioner": {
+      "type": "phmg"
+    },
+    "absolute_tolerance": 1e-6,
+    "max_iterations": 500,
+    "monitor": true
+  }
+}

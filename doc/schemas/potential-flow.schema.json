@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:neko:schema:potential-flow",
+  "title": "Neko potential-flow initializer configuration",
+  "type": "object",
+  "required": [
+    "version",
+    "case_file",
+    "solver"
+  ],
+  "properties": {
+    "version": {
+      "const": 1.0
+    },
+    "case_file": {
+      "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+    },
+    "mesh_file": {
+      "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+    },
+    "polynomial_order": {
+      "$ref": "urn:neko:schema:common#/$defs/positiveIntegerOrRef"
+    },
+    "output_filename": {
+      "type": "string",
+      "minLength": 5,
+      "pattern": "\\.fld$"
+    },
+    "evaluation_time": {
+      "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+    },
+    "cyclic": {
+      "type": "boolean"
+    },
+    "solver": {
+      "$ref": "urn:neko:schema:common#/$defs/linearSolver"
+    },
+    "boundary_conditions": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:neko:schema:fluid-pnpn-boundary-conditions#/$defs/fluidPnpnBoundaryCondition"
+      }
+    }
+  },
+  "additionalProperties": false
+}

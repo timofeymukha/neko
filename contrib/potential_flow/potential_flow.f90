@@ -41,6 +41,7 @@ program potential_flow
   use blasius, only : blasius_t
   use expression_dirichlet_vector, only : expression_dirichlet_vector_t
   use json_module, only : json_core, json_value
+  use json_utils, only : json_get_or_lookup_or_default
   use registry, only : neko_const_registry
   use math, only : NEKO_EPS
   use num_types, only : i8
@@ -48,6 +49,7 @@ program potential_flow
   use jacobi, only : jacobi_t
   use sx_jacobi, only : sx_jacobi_t
   use device_jacobi, only : device_jacobi_t
+  use hsmg, only : hsmg_t
   use phmg, only : phmg_t
   use precon, only : pc_t, precon_allocator, precon_destroy
   use field_math, only : field_glsum
@@ -71,14 +73,16 @@ program potential_flow
      class(bc_t), allocatable :: velocity_bc
   end type potential_boundary_t
 
-  character(len=NEKO_FNAME_LEN) :: case_fname
+  character(len=NEKO_FNAME_LEN) :: config_fname, case_fname
   character(len=NEKO_FNAME_LEN) :: mesh_fname
   character(len=NEKO_FNAME_LEN) :: output_fname
-  character(len=:), allocatable :: mesh_from_case
-  character(len=:), allocatable :: scheme
+  character(len=:), allocatable :: case_setting, mesh_setting
+  character(len=:), allocatable :: output_setting, scheme
+  character(len=:), allocatable :: solver_type, precon_type
+  character(len=:), allocatable :: boundary_path
   character(len=LOG_SIZE) :: log_buf
   character(len=80) :: suffix
-  type(json_file) :: params, time_params, precon_params
+  type(json_file) :: config, params, time_params, precon_params
   type(mesh_t) :: msh
   type(file_t) :: mesh_file, output_file
   type(space_t) :: Xh
@@ -97,30 +101,27 @@ program potential_flow
   integer :: argc, polynomial_order, lx, n
   integer :: i, max_iter
   integer(kind=i8) :: glb_n_points
-  real(kind=rp) :: tolerance
+  real(kind=rp) :: tolerance, relative_tolerance
   real(kind=rp) :: net_flux, abs_flux
   real(kind=rp) :: div_l2, div_linf
-  logical :: cyclic, has_dirichlet, using_phmg
+  logical :: cyclic, has_dirichlet, solver_monitor
+  logical :: has_relative_tolerance
 
   call neko_init()
   argc = command_argument_count()
 
-  if (argc .lt. 1 .or. argc .gt. 2) then
+  if (argc .ne. 1) then
      call usage()
      call neko_finalize()
      stop
   end if
 
-  call get_command_argument(1, case_fname)
-  output_fname = "potential_flow.fld"
-  if (argc .eq. 2) call get_command_argument(2, output_fname)
-
-  call filename_suffix(output_fname, suffix)
-  if (trim(suffix) .ne. "fld") then
-     call neko_error("The potential_flow output must have a .fld suffix")
-  end if
-
+  call get_command_argument(1, config_fname)
   call neko_job_info()
+  call config%load_file(filename = trim(config_fname))
+
+  call json_get(config, "case_file", case_setting)
+  case_fname = relative_to_file(config_fname, case_setting)
   call params%load_file(filename = trim(case_fname))
   call load_case_constants(params)
 
@@ -130,16 +131,38 @@ program potential_flow
           "scheme only")
   end if
 
-  call json_get(params, "case.mesh_file", mesh_from_case)
-  mesh_fname = relative_to_case(case_fname, mesh_from_case)
-  call json_get_or_lookup(params, "case.numerics.polynomial_order", &
-       polynomial_order)
+  if (config%valid_path("mesh_file")) then
+     call json_get(config, "mesh_file", mesh_setting)
+     mesh_fname = relative_to_file(config_fname, mesh_setting)
+  else
+     call json_get(params, "case.mesh_file", mesh_setting)
+     mesh_fname = relative_to_file(case_fname, mesh_setting)
+  end if
+
+  if (config%valid_path("polynomial_order")) then
+     call json_get_or_lookup(config, "polynomial_order", polynomial_order)
+  else
+     call json_get_or_lookup(params, "case.numerics.polynomial_order", &
+          polynomial_order)
+  end if
   lx = polynomial_order + 1
 
   call json_get(params, "case.time", time_params)
   call time%init(time_params)
+  if (config%valid_path("evaluation_time")) then
+     call json_get_or_lookup(config, "evaluation_time", time%t)
+  end if
+
+  call json_get_or_default(config, "output_filename", output_setting, &
+       "potential_flow.fld")
+  output_fname = relative_to_file(config_fname, output_setting)
+  call filename_suffix(output_fname, suffix)
+  if (trim(suffix) .ne. "fld") then
+     call neko_error("The potential_flow output must have a .fld suffix")
+  end if
 
   call neko_log%section("Potential flow initialization")
+  call neko_log%message("Configuration file: " // trim(config_fname))
   call neko_log%message("Case file: " // trim(case_fname))
   call neko_log%message("Mesh file: " // trim(mesh_fname))
 
@@ -154,6 +177,9 @@ program potential_flow
 
   cyclic = .false.
   call json_get_or_default(params, "case.fluid.cyclic", cyclic, .false.)
+  if (config%valid_path("cyclic")) then
+     call json_get(config, "cyclic", cyclic)
+  end if
   coef%cyclic = cyclic
   call coef%generate_cyclic_bc()
 
@@ -168,8 +194,17 @@ program potential_flow
   n = dm%size()
   glb_n_points = int(msh%glb_nelv, i8) * int(Xh%lxyz, i8)
 
-  call setup_boundaries(params, coef, time, boundaries, potential_bcs, &
-       flux_bcs, velocity_bcs, has_dirichlet)
+  if (config%valid_path("boundary_conditions")) then
+     boundary_path = "boundary_conditions"
+     call neko_log%message("Boundary conditions: configuration override")
+     call setup_boundaries(config, boundary_path, coef, time, boundaries, &
+          potential_bcs, flux_bcs, velocity_bcs, has_dirichlet)
+  else
+     boundary_path = "case.fluid.boundary_conditions"
+     call neko_log%message("Boundary conditions: referenced case")
+     call setup_boundaries(params, boundary_path, coef, time, boundaries, &
+          potential_bcs, flux_bcs, velocity_bcs, has_dirichlet)
+  end if
 
   rhs = 0.0_rp
   call flux_bcs%apply_scalar(rhs%x, n, time, strong = .false.)
@@ -206,23 +241,41 @@ program potential_flow
   coef%ifh2 = .false.
   call ax_helm_factory(Ax, full_formulation = .false.)
 
-  max_iter = 5000
-  call json_get_or_lookup(params, &
-       "case.fluid.pressure_solver.absolute_tolerance", tolerance)
-  call json_get(params, "case.fluid.pressure_solver.preconditioner", &
-       precon_params)
-  call initialize_preconditioner(preconditioner, coef, potential_bcs, &
-       precon_params, dm, gs, using_phmg)
-  call krylov_solver_factory(solver, n, "gmres", max_iter, &
-       abstol = tolerance, M = preconditioner, monitor = .false.)
-
-  if (using_phmg) then
-     call neko_log%message("Potential solver: GMRES with PHMG")
-  else
-     call neko_log%message("Potential solver: GMRES with Jacobi " // &
-          "(small-mesh fallback)")
+  call json_get(config, "solver.type", solver_type)
+  call json_get(config, "solver.preconditioner.type", precon_type)
+  call json_get(config, "solver.preconditioner", precon_params)
+  call json_get_or_lookup(config, "solver.absolute_tolerance", tolerance)
+  has_relative_tolerance = config%valid_path("solver.relative_tolerance")
+  if (has_relative_tolerance) then
+     call json_get_or_lookup(config, "solver.relative_tolerance", &
+          relative_tolerance)
   end if
+  call json_get_or_lookup_or_default(config, "solver.max_iterations", &
+       max_iter, 5000)
+  call json_get_or_default(config, "solver.monitor", solver_monitor, .false.)
+
+  call initialize_preconditioner(preconditioner, precon_type, coef, &
+       potential_bcs, precon_params, dm, gs)
+  call krylov_solver_allocator(solver, solver_type)
+  if (has_relative_tolerance) then
+     call solver%init(n, max_iter, M = preconditioner, &
+          rel_tol = relative_tolerance, abs_tol = tolerance, &
+          monitor = solver_monitor)
+  else
+     call solver%init(n, max_iter, M = preconditioner, &
+          abs_tol = tolerance, monitor = solver_monitor)
+  end if
+
+  call neko_log%message("Potential solver: " // trim(solver_type) // &
+       " with " // trim(precon_type))
   write(log_buf, '(A,ES13.5)') "Potential solver tolerance: ", tolerance
+  call neko_log%message(log_buf)
+  if (has_relative_tolerance) then
+     write(log_buf, '(A,ES13.5)') "Potential relative tolerance: ", &
+          relative_tolerance
+     call neko_log%message(log_buf)
+  end if
+  write(log_buf, '(A,I0)') "Potential solver maximum iterations: ", max_iter
   call neko_log%message(log_buf)
 
   phi = 0.0_rp
@@ -326,13 +379,13 @@ contains
   !> Print command-line usage.
   subroutine usage()
     if (pe_rank .eq. 0) then
-       write(*,*) "Usage: potential_flow <case file> [output.fld]"
+       write(*,*) "Usage: potential_flow <configuration.json>"
     end if
   end subroutine usage
 
-  !> Resolve a mesh path relative to the case-file directory.
-  function relative_to_case(case_file, path) result(resolved)
-    character(len=*), intent(in) :: case_file
+  !> Resolve a path relative to the file in which it was configured.
+  function relative_to_file(source_file, path) result(resolved)
+    character(len=*), intent(in) :: source_file
     character(len=*), intent(in) :: path
     character(len=NEKO_FNAME_LEN) :: resolved
     integer :: slash
@@ -342,13 +395,13 @@ contains
        return
     end if
 
-    slash = scan(trim(case_file), "/", back = .true.)
+    slash = scan(trim(source_file), "/", back = .true.)
     if (slash .gt. 0) then
-       resolved = case_file(1:slash) // trim(path)
+       resolved = source_file(1:slash) // trim(path)
     else
        resolved = trim(path)
     end if
-  end function relative_to_case
+  end function relative_to_file
 
   !> Populate the constant registry used by json_get_or_lookup.
   subroutine load_case_constants(case_params)
@@ -391,10 +444,11 @@ contains
     end do
   end subroutine load_case_constants
 
-  !> Construct potential and velocity boundary conditions from the case.
-  subroutine setup_boundaries(case_params, c, time_state, boundary, &
+  !> Construct potential and velocity boundary conditions from JSON.
+  subroutine setup_boundaries(boundary_params, path, c, time_state, boundary, &
        phi_list, flux_list, velocity_list, any_dirichlet)
-    type(json_file), intent(inout) :: case_params
+    type(json_file), intent(inout) :: boundary_params
+    character(len=*), intent(in) :: path
     type(coef_t), target, intent(in) :: c
     type(time_state_t), intent(in) :: time_state
     type(potential_boundary_t), allocatable, target, intent(out) :: boundary(:)
@@ -410,9 +464,8 @@ contains
     integer :: i, j, n_bcs, zone
 
     n_bcs = 0
-    if (case_params%valid_path("case.fluid.boundary_conditions")) then
-       call case_params%info("case.fluid.boundary_conditions", &
-            n_children = n_bcs)
+    if (boundary_params%valid_path(path)) then
+       call boundary_params%info(path, n_children = n_bcs)
     end if
 
     allocate(boundary(n_bcs))
@@ -430,10 +483,10 @@ contains
        return
     end if
 
-    call case_params%get_core(core)
-    call case_params%get("case.fluid.boundary_conditions", bc_array, found)
+    call boundary_params%get_core(core)
+    call boundary_params%get(path, bc_array, found)
     if (.not. found) then
-       call neko_error("Unable to read fluid boundary conditions")
+       call neko_error("Unable to read potential-flow boundary conditions")
     end if
 
     do i = 1, n_bcs
@@ -540,28 +593,20 @@ contains
     bc_object%zone_indices = zones
   end subroutine mark_zones
 
-  !> Initialize PHMG, with a Jacobi fallback for degenerate coarse meshes.
-  subroutine initialize_preconditioner(pc, c, bcs, pc_params, dof, &
-       gather_scatter, using_phmg)
+  !> Initialize a Neko preconditioner from the standalone solver settings.
+  subroutine initialize_preconditioner(pc, type_name, c, bcs, pc_params, &
+       dof, gather_scatter)
     class(pc_t), allocatable, target, intent(inout) :: pc
+    character(len=*), intent(in) :: type_name
     type(coef_t), target, intent(in) :: c
     type(bc_list_t), target, intent(inout) :: bcs
     type(json_file), intent(inout) :: pc_params
     type(dofmap_t), target, intent(in) :: dof
     type(gs_t), target, intent(inout) :: gather_scatter
-    logical, intent(out) :: using_phmg
 
-    using_phmg = c%msh%glb_nelv .gt. pe_size
-    if (using_phmg) then
-       call precon_allocator(pc, "phmg")
-       select type (multigrid => pc)
-       type is (phmg_t)
-          call multigrid%init(c, bcs, pc_params)
-       class default
-          call neko_error("Unable to initialize the PHMG preconditioner")
-       end select
-    else
-       call precon_allocator(pc, "jacobi")
+    call precon_allocator(pc, type_name)
+    select case (trim(type_name))
+    case ("jacobi")
        select type (jacobi => pc)
        type is (jacobi_t)
           call jacobi%init(c, dof, gather_scatter)
@@ -572,7 +617,26 @@ contains
        class default
           call neko_error("Unable to initialize the Jacobi preconditioner")
        end select
-    end if
+    case ("hsmg")
+       select type (multigrid => pc)
+       type is (hsmg_t)
+          call multigrid%init(c, bcs, pc_params)
+       class default
+          call neko_error("Unable to initialize the HSMG preconditioner")
+       end select
+    case ("phmg")
+       select type (multigrid => pc)
+       type is (phmg_t)
+          call multigrid%init(c, bcs, pc_params)
+       class default
+          call neko_error("Unable to initialize the PHMG preconditioner")
+       end select
+    case ("ident")
+       continue
+    case default
+       call neko_error("Unsupported potential_flow preconditioner: " // &
+            trim(type_name))
+    end select
   end subroutine initialize_preconditioner
 
   !> Remove the constant null-space component on the active backend.

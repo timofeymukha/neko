@@ -38,6 +38,24 @@ def test_example_case_schema(case_file):
     )
 
 
+def test_potential_flow_configuration_schema():
+    configuration = REPO_ROOT / "contrib/potential_flow/example.json"
+    schema = REPO_ROOT / "doc/schemas/potential-flow.schema.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR),
+            "--schema",
+            str(schema),
+            str(configuration),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize(
     "property_path",
     [
