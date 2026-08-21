@@ -7,6 +7,7 @@ SUBDIRS = rea2nbin\
 	  calc_lift_from_field\
 	  postprocess_fluid_stats\
 	  mesh_checker\
+	  potential_flow\
 	  map_to_equidistant_1d\
 	  adios2_to_nek5000\
 	  psnr

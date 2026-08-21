@@ -1,0 +1,53 @@
+# Potential-flow initializer
+
+`potential_flow` builds a Neko field file containing `p`, `u`, `v`, and `w`
+from a scalar velocity-potential solve. It is intended to provide a smooth,
+approximately divergence-free initial condition before starting an
+incompressible `pnpn` simulation.
+
+```console
+potential_flow case.case [output.fld]
+```
+
+The default output name is `potential_flow.fld`. As with other Neko field
+writers, this creates a field series such as `potential_flow0.nek5000` and
+`potential_flow0.f00000`. Point the case's field initial condition at the first
+data file, for example:
+
+```json
+"initial_condition": {
+  "type": "field",
+  "file_name": "potential_flow0.f00000"
+}
+```
+
+The utility solves
+
+\[
+  \nabla^2 \phi = 0, \qquad \mathbf{u} = \nabla \phi.
+\]
+
+Velocity-prescribed boundaries provide the Neumann condition
+`d(phi)/dn = u_boundary . n`. Pressure/outflow boundaries set `phi = 0`; the
+zero value only fixes the arbitrary potential reference. The discontinuous
+element gradients are projected through the assembled mass matrix before the
+velocity boundary conditions are reapplied.
+
+Supported boundary mappings are:
+
+- Neumann potential plus velocity reapplication: `velocity_value`,
+  `expression_velocity`, `blasius_profile`, stationary `no_slip`, and
+  `symmetry`.
+- Homogeneous Neumann potential: `shear_stress` and `wall_model`.
+- Zero Dirichlet potential: pressure and outflow variants.
+
+Moving walls, `user_velocity`, and `overset_interface` require runtime user
+data and are rejected. The current implementation supports CPU backends. For a
+pure-Neumann problem, the prescribed total flux must be compatible; the
+utility diagnoses and rejects a nonzero net flux. A fully periodic domain has
+no way to infer a nonzero mean velocity and therefore produces the zero-flow
+solution.
+
+The field pressure is initialized to zero. The utility reports the potential
+solver residual, total prescribed flux, and velocity-divergence norms before
+and after strong velocity boundary conditions are reapplied.
