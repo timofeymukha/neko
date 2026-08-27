@@ -43,7 +43,9 @@ submodule (krylov) krylov_fctry
   use fusedcg_device, only : fusedcg_device_t
   use fusedcg_cpld_device, only : fusedcg_cpld_device_t
   use bicgstab, only : bicgstab_t
+  use bicgstab_device, only : bicgstab_device_t
   use bicgstab_cpld, only : bicgstab_cpld_t
+  use bicgstab_cpld_device, only : bicgstab_cpld_device_t
   use gmres, only : gmres_t
   use cheby, only : cheby_t
   use cheby_device, only : cheby_device_t
@@ -176,11 +178,15 @@ contains
        end if
 
     case ('bicgstab')
-       allocate(bicgstab_t::object)
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          allocate(bicgstab_device_t::object)
+       else
+          allocate(bicgstab_t::object)
+       end if
 
     case ('coupled_bicgstab')
        if (NEKO_BCKND_DEVICE .eq. 1) then
-          call neko_error('Coupled BiCGStab is not supported on devices')
+          allocate(bicgstab_cpld_device_t::object)
        else
           allocate(bicgstab_cpld_t::object)
        end if
