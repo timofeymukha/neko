@@ -64,7 +64,7 @@ module hsmg
   use math, only : copy, col2, add2
   use utils, only : neko_error
   use precon, only : pc_t, precon_allocator, precon_destroy
-  use ax_product, only : ax_t, ax_helm_factory
+  use ax_product, only : ax_t, ax_helm_allocator
   use gather_scatter, only : gs_t, GS_OP_ADD
   use interpolation, only : interpolator_t
   use bc, only : bc_t
@@ -81,7 +81,7 @@ module hsmg
   use space, only : space_t, GLL
   use dofmap, only : dofmap_t
   use field, only : field_t
-  use coefs, only : coef_t
+  use coefs, only : coef_t, COEF_OPERATOR
   use mesh, only : mesh_t
   use json_module, only : json_file
   use json_utils, only : json_get_or_default
@@ -272,16 +272,18 @@ contains
     call this%dm_crs%init(coef%msh, this%Xh_crs)
     call this%gs_crs%init(this%dm_crs)
     call this%e_crs%init(this%dm_crs, 'work crs')
-    call this%c_crs%init(this%gs_crs)
+    ! Both coarse levels read G_ij, h1, h2, B and mult and nothing else, and
+    ! hsmg never rebuilds their geometry, so the rest is dead weight.
+    call this%c_crs%init(this%gs_crs, COEF_OPERATOR)
 
     call this%Xh_mg%init(GLL, lx_mid, lx_mid, lx_mid)
     call this%dm_mg%init(coef%msh, this%Xh_mg)
     call this%gs_mg%init(this%dm_mg)
     call this%e_mg%init(this%dm_mg, 'work midl')
-    call this%c_mg%init(this%gs_mg)
+    call this%c_mg%init(this%gs_mg, COEF_OPERATOR)
 
     ! Create backend specific Ax operator
-    call ax_helm_factory(this%ax, full_formulation = .false.)
+    call ax_helm_allocator(this%ax, type_name = "standard")
 
     call this%bc_crs%init_base(this%c_crs)
     call this%bc_mg%init_base(this%c_mg)

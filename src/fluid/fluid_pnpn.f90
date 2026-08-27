@@ -1,4 +1,4 @@
-! Copyright (c) 2022-2025, The Neko Authors
+! Copyright (c) 2022-2026, The Neko Authors
 ! All rights reserved.
 !
 ! Redistribution and use in source and binary forms, with or without
@@ -59,7 +59,9 @@ module fluid_pnpn
   use json_module, only : json_file, json_core, json_value
   use json_utils, only : json_get, json_get_or_default, json_extract_item, &
        json_get_or_lookup, json_get_or_lookup_or_default
-  use ax_product, only : ax_t, ax_helm_factory
+  use ax_product, only : ax_t, ax_helm_allocator
+  use ax_helm_svv_KS, only : ax_helm_svv_KS_t
+  use ax_helm_svv_KS_full, only : ax_helm_svv_KS_full_t
   use field, only : field_t
   use dirichlet, only : dirichlet_t
   use shear_stress, only : shear_stress_t
@@ -294,29 +296,16 @@ contains
          .false.)
     call this%c_Xh%generate_cyclic_bc()
 
-    if (this%full_stress_formulation) then
-       ! Setup backend dependent Ax routines
-       if (this%svv_enabled) then
-          call ax_helm_factory(this%Ax_vel, full_formulation = .true., &
-               svv = this%svv)
-       else
-          call ax_helm_factory(this%Ax_vel, full_formulation = .true.)
-       end if
+    ! Setup backend dependent Ax routines for the velocity
+    call fluid_pnpn_ax_vel_factory(this)
 
+    if (this%full_stress_formulation) then
        ! Setup backend dependent prs residual routines
        call pnpn_prs_res_stress_factory(this%prs_res)
 
        ! Setup backend dependent vel residual routines
        call pnpn_vel_res_stress_factory(this%vel_res)
     else
-       ! Setup backend dependent Ax routines
-       if (this%svv_enabled) then
-          call ax_helm_factory(this%Ax_vel, full_formulation = .false., &
-               svv = this%svv)
-       else
-          call ax_helm_factory(this%Ax_vel, full_formulation = .false.)
-       end if
-
        ! Setup backend dependent prs residual routines
        call pnpn_prs_res_factory(this%prs_res)
 
@@ -338,7 +327,7 @@ contains
     end if
 
     ! Setup Ax for the pressure
-    call ax_helm_factory(this%Ax_prs, full_formulation = .false.)
+    call ax_helm_allocator(this%Ax_prs, type_name = "standard")
 
 
     ! Setup backend dependent summation of AB/BDF
@@ -433,6 +422,9 @@ contains
 
     ! Initialize the advection factory
     call json_get_or_default(params, 'case.fluid.advection', advection, .true.)
+    ! OIFS integrates the advection term. With advection disabled, fall back to
+    ! the standard BDF history assembly.
+    this%oifs = this%oifs .and. advection
     call json_get(params, 'case.numerics', numerics_params)
     call advection_factory(this%adv, numerics_params, this%c_Xh, &
          this%ulag, this%vlag, this%wlag, &
@@ -460,6 +452,35 @@ contains
     nullify(bc_i, vel_bc)
 
   end subroutine fluid_pnpn_init
+
+  !> Allocate and configure the Helmholtz matrix-vector product for the
+  !! velocity, `this%Ax_vel`.
+  subroutine fluid_pnpn_ax_vel_factory(this)
+    class(fluid_pnpn_t), target, intent(inout) :: this
+
+    if (this%full_stress_formulation) then
+       if (this%svv_enabled) then
+          call ax_helm_allocator(this%Ax_vel, type_name = "full_svv")
+          select type (operator => this%Ax_vel)
+          class is (ax_helm_svv_KS_full_t)
+             operator%svv => this%svv
+          end select
+       else
+          call ax_helm_allocator(this%Ax_vel, type_name = "full")
+       end if
+    else
+       if (this%svv_enabled) then
+          call ax_helm_allocator(this%Ax_vel, type_name = "standard_svv")
+          select type (operator => this%Ax_vel)
+          class is (ax_helm_svv_KS_t)
+             operator%svv => this%svv
+          end select
+       else
+          call ax_helm_allocator(this%Ax_vel, type_name = "standard")
+       end if
+    end if
+
+  end subroutine fluid_pnpn_ax_vel_factory
 
   subroutine fluid_pnpn_restart(this, chkp)
     class(fluid_pnpn_t), target, intent(inout) :: this
@@ -744,7 +765,7 @@ contains
          ! Add the advection operators to the right-hand-side.
          call this%adv%compute(u, v, w, &
               this%advx, this%advy, this%advz, &
-              Xh, this%c_Xh, dm_Xh%size(), dt)
+              Xh, this%c_Xh, dm_Xh%size(), real(dt, kind=rp))
 
          ! At this point the RHS contains the sum of the advection operator and
          ! additional source terms, evaluated using the velocity field from the
@@ -756,10 +777,11 @@ contains
               f_x%x, f_y%x, f_z%x, &
               rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
 
-         ! Now, the source terms from the previous time step are added to the RHS.
+         ! Now, the source terms from the previous time step are added to the
+         ! RHS.
          call makeoifs%compute_fluid(this%advx%x, this%advy%x, this%advz%x, &
               f_x%x, f_y%x, f_z%x, &
-              rho%x(1,1,1,1), dt, n)
+              rho%x(1,1,1,1), real(dt, kind=rp), n)
       else
          ! Add the advection operators to the right-hand-side.
          call this%adv%compute(u, v, w, &
@@ -781,7 +803,8 @@ contains
          ! For a normal simulation (no moving mesh), Blag and Blaglag
          ! are just the initial B matrix, filled at initialization.
          call makebdf%compute_fluid(ulag, vlag, wlag, f_x%x, f_y%x, f_z%x, &
-              u, v, w, c_Xh%B, c_Xh%Blag, c_Xh%Blaglag, rho%x(1,1,1,1), dt, &
+              u, v, w, c_Xh%B, c_Xh%Blag, c_Xh%Blaglag, rho%x(1,1,1,1), &
+              real(dt, kind=rp), &
               ext_bdf%diffusion_coeffs%x, ext_bdf%ndiff, n)
 
       end if
@@ -822,7 +845,7 @@ contains
               f_x, f_y, f_z, &
               c_Xh, gs_Xh, &
               this%bc_prs_surface, this%bc_sym_surface,&
-              Ax_prs, ext_bdf%diffusion_coeffs%x(1), dt, &
+              Ax_prs, ext_bdf%diffusion_coeffs%x(1), real(dt, kind=rp), &
               mu_tot, rho, event)
 
 
@@ -884,7 +907,7 @@ contains
               f_x, f_y, f_z, &
               c_Xh, msh, Xh, &
               mu_tot, rho, ext_bdf%diffusion_coeffs%x(1), &
-              dt, dm_Xh%size())
+              real(dt, kind=rp), dm_Xh%size())
 
          call rotate_cyc(u_res, v_res, w_res, 1, c_Xh)
          call gs_Xh%op(u_res%x, v_res%x, w_res%x, dm_Xh%size(), &
@@ -942,10 +965,10 @@ contains
          ! Horrible mu hack?!
          call this%vol_flow%adjust( u, v, w, p, u_res, v_res, w_res, p_res, &
               c_Xh, gs_Xh, ext_bdf, rho%x(1,1,1,1), mu_tot, &
-              dt, time, this%bclst_dp, this%bclst_du, this%bclst_dv, &
-              this%bclst_dw, this%bclst_vel_res, Ax_vel, Ax_prs, this%ksp_prs, &
-              this%ksp_vel, this%pc_prs, this%pc_vel, this%ksp_prs%max_iter, &
-              this%ksp_vel%max_iter)
+              real(dt, kind=rp), time, this%bclst_dp, this%bclst_du, &
+              this%bclst_dv, this%bclst_dw, this%bclst_vel_res, Ax_vel, &
+              Ax_prs, this%ksp_prs, this%ksp_vel, this%pc_prs, this%pc_vel, &
+              this%ksp_prs%max_iter, this%ksp_vel%max_iter)
       end if
 
       if (this%svv_enabled) then
@@ -1081,10 +1104,10 @@ contains
              type is (symmetry_t)
                 ! Symmetry has 3 internal bcs, but only one actually contains
                 ! markings.
-                ! Symmetry's apply_scalar doesn't do anything, so we need to mark
-                ! individual nested bcs to the du,dv,dw, whereas the vel_res can
-                ! just get symmetry as a whole, because on this list we call
-                ! apply_vector.
+                ! Symmetry's apply_scalar doesn't do anything, so we need to
+                ! mark individual nested bcs to the du,dv,dw, whereas the
+                ! vel_res can just get symmetry as a whole, because on this
+                ! list we call apply_vector.
                 ! Additionally we have to mark the special surface bc for p.
                 call this%bclst_vel_res%append(bc_i)
                 call this%bc_du%mark_facets(bc_i%bc_x%marked_facet)
