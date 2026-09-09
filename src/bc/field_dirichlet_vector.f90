@@ -35,8 +35,8 @@ module field_dirichlet_vector
   use num_types, only : rp
   use coefs, only : coef_t
   use dirichlet, only : dirichlet_t
-  use bc, only : bc_t, BC_DIRICHLET
-  use bc_list, only : bc_list_t
+  use vector_bc, only : vector_bc_t
+  use bc, only : BC_DIRICHLET
   use utils, only : split_string
   use field, only : field_t
   use field_list, only : field_list_t
@@ -44,7 +44,6 @@ module field_dirichlet_vector
   use device_math, only : device_masked_copy_0
   use dofmap, only : dofmap_t
   use field_dirichlet, only : field_dirichlet_t, field_dirichlet_update
-  use utils, only : neko_error
   use json_module, only : json_file
   use field_list, only : field_list_t
   use, intrinsic :: iso_c_binding, only : c_ptr, c_size_t
@@ -54,7 +53,7 @@ module field_dirichlet_vector
 
   !> Extension of the user defined dirichlet condition `field_dirichlet`
   ! for the application on a vector field.
-  type, public, extends(bc_t) :: field_dirichlet_vector_t
+  type, public, extends(vector_bc_t) :: field_dirichlet_vector_t
      ! The bc for the first compoent.
      type(field_dirichlet_t) :: bc_u
      ! The bc for the second compoent.
@@ -76,18 +75,12 @@ module field_dirichlet_vector
      procedure, pass(this) :: free => field_dirichlet_vector_free
      !> Finalize.
      procedure, pass(this) :: finalize => field_dirichlet_vector_finalize
-     !> Apply scalar by performing a masked copy.
-     procedure, pass(this) :: apply_scalar => &
-          field_dirichlet_vector_apply_scalar
      !> (No-op) Apply vector.
      procedure, pass(this) :: apply_vector => &
           field_dirichlet_vector_apply_vector
      !> (No-op) Apply vector (device).
      procedure, pass(this) :: apply_vector_dev => &
           field_dirichlet_vector_apply_vector_dev
-     !> Apply scalar (device).
-     procedure, pass(this) :: apply_scalar_dev => &
-          field_dirichlet_vector_apply_scalar_dev
   end type field_dirichlet_vector_t
 
 contains
@@ -142,38 +135,6 @@ contains
        nullify(this%update)
     end if
   end subroutine field_dirichlet_vector_free
-
-  !> No-op apply scalar.
-  !! @param x Field onto which to copy the values (e.g. u,v,w,p or s).
-  !! @param n Size of the array `x`.
-  !! @param t Current time state.
-  subroutine field_dirichlet_vector_apply_scalar(this, x, n, time, strong)
-    class(field_dirichlet_vector_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-
-    call neko_error("field_dirichlet_vector cannot apply scalar BCs.&
-    & Use field_dirichlet instead!")
-
-  end subroutine field_dirichlet_vector_apply_scalar
-
-  !> No-op apply scalar (device).
-  !! @param x_d Device pointer to the field onto which to copy the values.
-  !! @param time The current time state.
-  subroutine field_dirichlet_vector_apply_scalar_dev(this, x_d, time, &
-       strong, strm)
-    class(field_dirichlet_vector_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-
-    call neko_error("field_dirichlet_vector cannot apply scalar BCs.&
-    & Use field_dirichlet instead!")
-
-  end subroutine field_dirichlet_vector_apply_scalar_dev
 
   !> Apply the boundary condition to a vector field.
   !! @param x x-component of the field onto which to apply the values.

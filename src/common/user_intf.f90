@@ -37,7 +37,6 @@ module user_intf
   use vector_list, only : vector_list_t
   use mask, only : mask_t
   use coefs, only : coef_t
-  use bc_list, only : bc_list_t
   use mesh, only : mesh_t
   use overset_interface, only : morph_overset_interface
   use field_dirichlet, only : field_dirichlet_update

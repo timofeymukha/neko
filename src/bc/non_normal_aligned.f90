@@ -33,7 +33,8 @@
 !> Implements `non_normal_aligned_t`.
 module non_normal_aligned
   use json_module, only : json_file
-  use bc, only : bc_t, BC_MIXED_CONSTRAINS_TANGENT
+  use vector_bc, only : vector_bc_t
+  use bc, only : BC_MIXED_CONSTRAINS_TANGENT
   use dirichlet, only : dirichlet_t
   use device_inhom_dirichlet, only : device_inhom_dirichlet_apply_scalar
   use import_field_utils, only : import_fields
@@ -58,7 +59,7 @@ module non_normal_aligned
   !! @details Since `dirichlet_t` currently only supports constant values,
   !! we store the values separately in vectors, and use the nested `dirichlet_t`
   !! only for its mask.
-  type, public, extends(bc_t) :: non_normal_aligned_t
+  type, public, extends(vector_bc_t) :: non_normal_aligned_t
      !> Nested dirichlet bcs for each component. Used only for their masks.
      type(dirichlet_t) :: bc_x
      type(dirichlet_t) :: bc_y
@@ -80,13 +81,8 @@ module non_normal_aligned
      real(kind=dp), private :: field_interp_tolerance = GLOB_INTERP_TOL
      real(kind=dp), private :: field_interp_padding = GLOB_INTERP_PAD
    contains
-     !> No-op scalar application.
-     procedure, pass(this) :: apply_scalar => non_normal_aligned_apply_scalar
      !> Apply the tangential components of the prescribed vector on the CPU.
      procedure, pass(this) :: apply_vector => non_normal_aligned_apply_vector
-     !> No-op scalar application on the device.
-     procedure, pass(this) :: apply_scalar_dev => &
-          non_normal_aligned_apply_scalar_dev
      !> Apply the tangential components of the prescribed vector on the device.
      procedure, pass(this) :: apply_vector_dev => &
           non_normal_aligned_apply_vector_dev
@@ -212,19 +208,6 @@ contains
     this%use_constant_value = .false.
   end subroutine non_normal_aligned_set_values
 
-  !> No-op scalar application.
-  !! @param x Scalar field values.
-  !! @param n Number of entries in `x`.
-  !! @param time Current time state.
-  !! @param strong Whether to apply the strong form.
-  subroutine non_normal_aligned_apply_scalar(this, x, n, time, strong)
-    class(non_normal_aligned_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-  end subroutine non_normal_aligned_apply_scalar
-
   !> Apply the tangential components of the prescribed vector on the CPU.
   !! @details Each nested Dirichlet boundary condition contributes only its
   !! compact mask. The corresponding component values are stored in the same
@@ -267,19 +250,6 @@ contains
        end do
     end if
   end subroutine non_normal_aligned_apply_vector
-
-  !> No-op scalar application on the device.
-  !! @param x_d Device pointer to the scalar field.
-  !! @param time Current time state.
-  !! @param strong Whether to apply the strong form.
-  !! @param strm Device stream.
-  subroutine non_normal_aligned_apply_scalar_dev(this, x_d, time, strong, strm)
-    class(non_normal_aligned_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-  end subroutine non_normal_aligned_apply_scalar_dev
 
   !> Apply the tangential components of the prescribed vector on the device.
   !! @details Uses the compact per-component storage together with the masks of

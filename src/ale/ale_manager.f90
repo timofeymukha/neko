@@ -42,6 +42,7 @@ module ale_manager
   use krylov, only : ksp_t, ksp_monitor_t, krylov_solver_factory
   use precon, only : pc_t, precon_allocator, precon_destroy
   use bc_list, only : bc_list_t
+  use scalar_bc_list, only : scalar_bc_list_t
   use checkpoint, only : chkp_t
   use zero_dirichlet, only : zero_dirichlet_t
   use gather_scatter, only : gs_t, GS_OP_ADD
@@ -100,7 +101,7 @@ module ale_manager
      logical :: active = .false.
      logical :: has_moving_boundary = .false.
 
-     type(bc_list_t) :: bc_list
+     type(scalar_bc_list_t) :: bc_list
      type(zero_dirichlet_t) :: bc_moving
      type(zero_dirichlet_t) :: bc_fixed
 
@@ -1522,7 +1523,7 @@ contains
     type(coef_t), target, intent(in) :: coef
     type(dofmap_t), target, intent(in) :: dof
     type(gs_t), target, intent(inout) :: gs
-    type(bc_list_t), target, intent(inout) :: bclst
+    class(bc_list_t), target, intent(inout) :: bclst
     character(len=*), intent(in) :: pctype
     type(json_file), intent(inout) :: params
     call precon_allocator(pc, pctype)

@@ -202,8 +202,12 @@ neko_fortran_SOURCES = \
 	bc/scalar_bc_projector.f90\
 	bc/vector_bc_projector.f90\
 	bc/bc.f90\
+	bc/scalar_bc.f90\
+	bc/vector_bc.f90\
 	bc/mixed_bc.f90\
 	bc/bc_list.f90\
+	bc/scalar_bc_list.f90\
+	bc/vector_bc_list.f90\
 	bc/dirichlet.f90\
 	bc/neumann.f90\
 	bc/no_slip.f90\

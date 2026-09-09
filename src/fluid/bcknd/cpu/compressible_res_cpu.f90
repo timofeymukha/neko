@@ -48,7 +48,7 @@ module compressible_res_cpu
   use field_list, only : field_list_t
   use compressible_ops_cpu, only : compressible_ops_cpu_update_uvw, &
        compressible_ops_cpu_update_mxyz_p_ruvw
-  use bc_list, only : bc_list_t
+  use vector_bc_list, only : vector_bc_list_t
   use time_state, only : time_state_t
   implicit none
   private
@@ -95,7 +95,7 @@ contains
     class(Ax_t), intent(inout) :: Ax, Ax_stress
     type(coef_t), intent(inout) :: coef
     type(gs_t), intent(inout) :: gs
-    type(bc_list_t), intent(inout) :: bcs_vel
+    type(vector_bc_list_t), intent(inout) :: bcs_vel
     type(time_state_t), intent(in) :: time
     class(runge_kutta_time_scheme_t), intent(in) :: rk_scheme
     real(kind=rp), intent(in) :: dt

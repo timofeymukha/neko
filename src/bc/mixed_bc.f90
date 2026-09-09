@@ -29,7 +29,7 @@
 !
 !> Implements `mixed_bc_t`.
 module mixed_bc
-  use bc, only : bc_t
+  use vector_bc, only : vector_bc_t
   use neko_config, only : NEKO_BCKND_DEVICE
   use num_types, only : rp
   use device, only : DEVICE_TO_HOST
@@ -47,7 +47,7 @@ module mixed_bc
 
   !> Base type for mixed boundary conditions that need projector-provided
   !! local-basis data on the physical field.
-  type, public, abstract, extends(bc_t) :: mixed_bc_t
+  type, public, abstract, extends(vector_bc_t) :: mixed_bc_t
      !> Resolved subset of local dofs where this mixed bc remains active after
      !! global boundary-condition resolution. Populated by a
      !! `coupled_vector_bc_projector_t`.

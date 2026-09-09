@@ -2,6 +2,36 @@
 
 ## Develop
 
+- *BREAKING* `bc_t` no longer declares the apply interface. It now carries only
+  what a boundary condition knows about *where* it acts --- marked facets, the
+  dof masks derived from them, the name, zone indices and `bc_type` --- and two
+  new abstract types add the apply interface: `scalar_bc_t` (`apply_scalar`,
+  `apply_scalar_dev`) for conditions that constrain a single field, and
+  `vector_bc_t` (`apply_vector`, `apply_vector_dev`) for conditions that
+  constrain three components. Conditions that only need a boundary mask, such
+  as `facet_normal_t` and the mask holders in the simulation components, extend
+  `bc_t` directly. Every existing condition moved to whichever base matches the
+  routine it actually implemented, which removed around 450 lines of no-op and
+  `neko_error("cannot apply ...")` stubs. `dirichlet_t`, `zero_dirichlet_t` and
+  `neumann_t` are now scalar-only; `no_slip_t` extends `vector_bc_t` instead of
+  `zero_dirichlet_t` and owns its masked zeroing. Code deriving from `bc_t`
+  must extend `scalar_bc_t` or `vector_bc_t` to be applied to a field.
+- *BREAKING* `bc_list_t` is now an abstract base holding the valence-independent
+  queries (`get`, `size`, `get_by_name`, `get_by_zone_index`, `is_empty`,
+  `bc_type`), with `scalar_bc_list_t` and `vector_bc_list_t` owning the storage
+  and the corresponding `apply`. Appending a condition of the wrong valence is
+  now a compile-time error rather than a no-op or a runtime abort when the list
+  is applied. Both concrete lists also offer a valence-typed accessor
+  (`get_scalar` / `get_vector`) for callers that need to apply a condition; the
+  inherited `get` still returns a `bc_t` pointer for the mask-level code. The
+  boundary-condition projectors and the multigrid and preconditioner factories
+  take a `class(bc_list_t)`, so they serve either list.
+- The compressible `no_slip` velocity condition now allocates `no_slip_t`
+  rather than a bare `zero_dirichlet_t`, matching the incompressible scheme.
+  Behaviour is unchanged for a stationary wall.
+- Fixed `bc_apply_scalar_generic` dropping the `strong` argument on the CPU
+  path, so a weak scalar application through a field no longer ran as strong.
+- Removed the unused `bc_alloc_t` helper.
 - Added a coupled CPU BiCGStab solver for three-component vector systems.
 - The gather-scatter comm. backend autotuning now covers the device-resident
   backends. With `NEKO_GS_COMM` unset, a CUDA or HIP build benchmarks

@@ -134,7 +134,7 @@ contains
   subroutine phmg_init(this, coef, bclst, phmg_params)
     class(phmg_t), intent(inout), target :: this
     type(coef_t), intent(in), target :: coef
-    type(bc_list_t), intent(inout), target :: bclst
+    class(bc_list_t), intent(inout), target :: bclst
     type(json_file), intent(inout) :: phmg_params
     integer :: crs_tamg_lvls, crs_tamg_itrs, crs_tamg_cheby_degree
     integer :: smoother_itrs
@@ -189,7 +189,7 @@ contains
        pcrs_sched, update_enabled)
     class(phmg_t), intent(inout), target :: this
     type(coef_t), intent(in), target :: coef
-    type(bc_list_t), intent(inout), target :: bclst
+    class(bc_list_t), intent(inout), target :: bclst
     integer, intent(in) :: smoother_itrs
     character(len=:), allocatable :: cheby_acc
     integer, intent(in) :: crs_tamg_lvls, crs_tamg_itrs

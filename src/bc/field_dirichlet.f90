@@ -35,15 +35,14 @@ module field_dirichlet
   use num_types, only : rp
   use coefs, only : coef_t
   use dirichlet, only : dirichlet_t
-  use bc, only : bc_t, BC_DIRICHLET
-  use bc_list, only : bc_list_t
+  use scalar_bc, only : scalar_bc_t
+  use bc, only : BC_DIRICHLET
   use utils, only : split_string
   use field, only : field_t
   use field_list, only : field_list_t
   use math, only : masked_copy_0
   use device_math, only : device_masked_copy_0
   use dofmap, only : dofmap_t
-  use utils, only : neko_error
   use json_module, only : json_file
   use field_list, only : field_list_t
   use json_utils, only : json_get
@@ -62,7 +61,7 @@ module field_dirichlet
   !! @note Would be neat to add another class that contains all three
   !! dirichlet bcs for the velocity, this bc would then implement
   !! apply_vector.
-  type, public, extends(bc_t) :: field_dirichlet_t
+  type, public, extends(scalar_bc_t) :: field_dirichlet_t
      !> A dummy field which can be manipulated by the user to set the boundary
      !! values.
      type(field_t) :: field_bc
@@ -83,11 +82,6 @@ module field_dirichlet
      procedure, pass(this) :: finalize => field_dirichlet_finalize
      !> Apply scalar by performing a masked copy.
      procedure, pass(this) :: apply_scalar => field_dirichlet_apply_scalar
-     !> (No-op) Apply vector.
-     procedure, pass(this) :: apply_vector => field_dirichlet_apply_vector
-     !> (No-op) Apply vector (device).
-     procedure, pass(this) :: apply_vector_dev => &
-          field_dirichlet_apply_vector_dev
      !> Apply scalar (device).
      procedure, pass(this) :: apply_scalar_dev => &
           field_dirichlet_apply_scalar_dev
@@ -104,7 +98,7 @@ module field_dirichlet
   !! or "scalar".
   abstract interface
      subroutine field_dirichlet_update(fields, bc, time)
-       import rp, field_list_t, bc_t, field_dirichlet_t, time_state_t
+       import rp, field_list_t, field_dirichlet_t, time_state_t
        type(field_list_t), intent(inout) :: fields
        type(field_dirichlet_t), intent(in) :: bc
        type(time_state_t), intent(in) :: time
@@ -219,46 +213,6 @@ contains
     end if
 
   end subroutine field_dirichlet_apply_scalar_dev
-
-  !> (No-op) Apply vector.
-  !! @param x x-component of the field onto which to apply the values.
-  !! @param y y-component of the field onto which to apply the values.
-  !! @param z z-component of the field onto which to apply the values.
-  !! @param n Size of the `x`, `y` and `z` arrays.
-  !! @param time The current time state.
-  subroutine field_dirichlet_apply_vector(this, x, y, z, n, time, strong)
-    class(field_dirichlet_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-
-    call neko_error("field_dirichlet cannot apply vector BCs.&
-    & Use field_dirichlet_vector instead!")
-
-  end subroutine field_dirichlet_apply_vector
-
-  !> (No-op) Apply vector (device).
-  !! @param x x-component of the field onto which to apply the values.
-  !! @param y y-component of the field onto which to apply the values.
-  !! @param z z-component of the field onto which to apply the values.
-  !! @param time The current time state.
-  !! @param strm Device stream
-  subroutine field_dirichlet_apply_vector_dev(this, x_d, y_d, z_d, time, &
-       strong, strm)
-    class(field_dirichlet_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-    call neko_error("field_dirichlet cannot apply vector BCs.&
-    & Use field_dirichlet_vector instead!")
-
-  end subroutine field_dirichlet_apply_vector_dev
 
   !> Finalize
   subroutine field_dirichlet_finalize(this)

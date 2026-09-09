@@ -33,7 +33,8 @@
 !> Defines a Neumann boundary condition.
 module neumann
   use num_types, only : rp
-  use bc, only : bc_t, BC_NEUMANN
+  use scalar_bc, only : scalar_bc_t
+  use bc, only : BC_NEUMANN
   use, intrinsic :: iso_c_binding, only : c_ptr, c_null_ptr
   use utils, only : neko_error, nonlinear_index
   use coefs, only : coef_t
@@ -44,8 +45,7 @@ module neumann
   use neko_config, only : NEKO_BCKND_DEVICE
   use device_math, only : device_cfill, device_copy
   use device, only : device_memcpy, DEVICE_TO_HOST
-  use device_neumann, only : device_neumann_apply_scalar, &
-       device_neumann_apply_vector
+  use device_neumann, only : device_neumann_apply_scalar
   use time_state, only : time_state_t
   implicit none
   private
@@ -57,7 +57,7 @@ module neumann
   !! prescribed flux is zero and if so, the condition just does nothing. Setting
   !! the flux using the `set_flux` routine, automatically removes this
   !! assumption.
-  type, public, extends(bc_t) :: neumann_t
+  type, public, extends(scalar_bc_t) :: neumann_t
      !> The flux values at the boundary. Each vector in the array corresponds to
      !> a component of the flux.
      type(vector_t), allocatable :: flux(:)
@@ -71,9 +71,7 @@ module neumann
      logical :: uniform_0 = .false.
    contains
      procedure, pass(this) :: apply_scalar => neumann_apply_scalar
-     procedure, pass(this) :: apply_vector => neumann_apply_vector
      procedure, pass(this) :: apply_scalar_dev => neumann_apply_scalar_dev
-     procedure, pass(this) :: apply_vector_dev => neumann_apply_vector_dev
      !> Constructor
      procedure, pass(this) :: init => neumann_init
      !> Constructor from components, one flux value per component.
@@ -210,72 +208,6 @@ contains
   end subroutine neumann_apply_scalar
 
   !> Boundary condition apply for a generic Neumann condition
-  !! to vectors @a x, @a y and @a z
-  subroutine neumann_apply_vector(this, x, y, z, n, time, strong)
-    class(neumann_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    integer :: i, m, k, facet
-    ! Store non-linear index
-    integer :: idx(4)
-    logical :: strong_
-
-    if (present(strong)) then
-       strong_ = strong
-    else
-       strong_ = .true.
-    end if
-
-    m = this%facet_node_msk(0)
-    if (.not. strong_) then
-       !$omp parallel do private(k, facet, idx)
-       do i = 1, m
-          k = this%facet_node_msk(i)
-          facet = this%facet(i)
-          idx = nonlinear_index(k, this%coef%Xh%lx, this%coef%Xh%lx, &
-               this%coef%Xh%lx)
-          select case (facet)
-          case (1,2)
-             x(k) = x(k) + &
-                  this%flux(1)%x(i) * &
-                  this%coef%area(idx(2), idx(3), facet, idx(4))
-             y(k) = y(k) + &
-                  this%flux(2)%x(i) * &
-                  this%coef%area(idx(2), idx(3), facet, idx(4))
-             z(k) = z(k) + &
-                  this%flux(3)%x(i) * &
-                  this%coef%area(idx(2), idx(3), facet, idx(4))
-          case (3,4)
-             x(k) = x(k) + &
-                  this%flux(1)%x(i) * &
-                  this%coef%area(idx(1), idx(3), facet, idx(4))
-             y(k) = y(k) + &
-                  this%flux(2)%x(i) * &
-                  this%coef%area(idx(1), idx(3), facet, idx(4))
-             z(k) = z(k) + &
-                  this%flux(3)%x(i) * &
-                  this%coef%area(idx(1), idx(3), facet, idx(4))
-          case (5,6)
-             x(k) = x(k) + &
-                  this%flux(1)%x(i) * &
-                  this%coef%area(idx(1), idx(2), facet, idx(4))
-             y(k) = y(k) + &
-                  this%flux(2)%x(i) * &
-                  this%coef%area(idx(1), idx(2), facet, idx(4))
-             z(k) = z(k) + &
-                  this%flux(3)%x(i) * &
-                  this%coef%area(idx(1), idx(2), facet, idx(4))
-          end select
-       end do
-       !$omp end parallel do
-    end if
-  end subroutine neumann_apply_vector
-
-  !> Boundary condition apply for a generic Neumann condition
   !! to a vector @a x (device version)
   subroutine neumann_apply_scalar_dev(this, x_d, time, strong, strm)
     class(neumann_t), intent(inout), target :: this
@@ -299,36 +231,6 @@ contains
             size(this%facet_node_msk), strm)
     end if
   end subroutine neumann_apply_scalar_dev
-
-  !> Boundary condition apply for a generic Neumann condition
-  !! to vectors @a x, @a y and @a z (device version)
-  subroutine neumann_apply_vector_dev(this, x_d, y_d, z_d, &
-       time, strong, strm)
-    class(neumann_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-    logical :: strong_
-
-    if (present(strong)) then
-       strong_ = strong
-    else
-       strong_ = .true.
-    end if
-
-    if (.not. this%uniform_0 .and. this%facet_node_msk(0) .gt. 0 .and. &
-         .not. strong_) then
-       call device_neumann_apply_vector(this%facet_node_msk_d, this%facet_d, &
-            x_d, y_d, z_d, &
-            this%flux(1)%x_d, this%flux(2)%x_d, this%flux(3)%x_d, &
-            this%coef%area_d, this%coef%Xh%lx, &
-            size(this%facet_node_msk), strm)
-    end if
-
-  end subroutine neumann_apply_vector_dev
 
   !> Destructor
   subroutine neumann_free(this)

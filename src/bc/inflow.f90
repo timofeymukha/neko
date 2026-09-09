@@ -34,7 +34,8 @@
 module inflow
   use device_inflow, only : device_inflow_apply_vector
   use num_types, only : rp
-  use bc, only : bc_t, BC_DIRICHLET
+  use vector_bc, only : vector_bc_t
+  use bc, only : BC_DIRICHLET
   use, intrinsic :: iso_c_binding, only : c_ptr, c_loc
   use coefs, only : coef_t
   use json_module, only : json_file
@@ -45,12 +46,10 @@ module inflow
   private
 
   !> Dirichlet condition for inlet (vector valued)
-  type, public, extends(bc_t) :: inflow_t
+  type, public, extends(vector_bc_t) :: inflow_t
      real(kind=rp), dimension(3) :: x = [0d0, 0d0, 0d0]
    contains
-     procedure, pass(this) :: apply_scalar => inflow_apply_scalar
      procedure, pass(this) :: apply_vector => inflow_apply_vector
-     procedure, pass(this) :: apply_scalar_dev => inflow_apply_scalar_dev
      procedure, pass(this) :: apply_vector_dev => inflow_apply_vector_dev
      !> Constructor
      procedure, pass(this) :: init => inflow_init
@@ -94,24 +93,6 @@ contains
     this%bc_type = BC_DIRICHLET
     this%x = x
   end subroutine inflow_init_from_components
-
-  !> No-op scalar apply
-  subroutine inflow_apply_scalar(this, x, n, time, strong)
-    class(inflow_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-  end subroutine inflow_apply_scalar
-
-  !> No-op scalar apply (device version)
-  subroutine inflow_apply_scalar_dev(this, x_d, time, strong, strm)
-    class(inflow_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-  end subroutine inflow_apply_scalar_dev
 
   !> Apply inflow conditions (vector valued)
   subroutine inflow_apply_vector(this, x, y, z, n, time, strong)

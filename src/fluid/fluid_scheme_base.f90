@@ -47,7 +47,8 @@ module fluid_scheme_base
   use time_step_controller, only : time_step_controller_t
   use user_intf, only : user_t, user_material_properties_intf
   use utils, only : neko_error
-  use bc_list, only : bc_list_t
+  use scalar_bc_list, only : scalar_bc_list_t
+  use vector_bc_list, only : vector_bc_list_t
   use field_list, only : field_list_t
   use time_state, only : time_state_t
   implicit none
@@ -85,9 +86,9 @@ module fluid_scheme_base
 
      !> Boundary conditions
      ! List of boundary conditions for pressure
-     type(bc_list_t) :: bcs_prs
+     type(scalar_bc_list_t) :: bcs_prs
      ! List of boundary conditions for velocity
-     type(bc_list_t) :: bcs_vel
+     type(vector_bc_list_t) :: bcs_vel
 
      type(json_file), pointer :: params !< Parameters
      type(mesh_t), pointer :: msh => null() !< Mesh

@@ -35,6 +35,7 @@ submodule(fluid_scheme_compressible_ns) compressible_ns_bc_fctry
   use dirichlet, only : dirichlet_t
   use inflow, only : inflow_t
   use zero_dirichlet, only : zero_dirichlet_t
+  use no_slip, only : no_slip_t
   use symmetry, only : symmetry_t
   use json_utils, only : json_get_or_lookup
   implicit none
@@ -58,7 +59,7 @@ contains
   !! @param coef The SEM coeffcients.
   !! @param user The user interface.
   module subroutine density_bc_factory(object, scheme, json, coef, user)
-    class(bc_t), pointer, intent(inout) :: object
+    class(scalar_bc_t), pointer, intent(inout) :: object
     type(fluid_scheme_compressible_ns_t), intent(in) :: scheme
     type(json_file), intent(inout) :: json
     type(coef_t), intent(in) :: coef
@@ -103,7 +104,7 @@ contains
   !! @param coef The SEM coeffcients.
   !! @param user The user interface.
   module subroutine pressure_bc_factory(object, scheme, json, coef, user)
-    class(bc_t), pointer, intent(inout) :: object
+    class(scalar_bc_t), pointer, intent(inout) :: object
     type(fluid_scheme_compressible_ns_t), intent(inout) :: scheme
     type(json_file), intent(inout) :: json
     type(coef_t), intent(in) :: coef
@@ -162,7 +163,7 @@ contains
   !! @param coef The SEM coeffcients.
   !! @param user The user interface.
   module subroutine velocity_bc_factory(object, scheme, json, coef, user)
-    class(bc_t), pointer, intent(inout) :: object
+    class(vector_bc_t), pointer, intent(inout) :: object
     type(fluid_scheme_compressible_ns_t), intent(in) :: scheme
     type(json_file), intent(inout) :: json
     type(coef_t), intent(in) :: coef
@@ -181,7 +182,7 @@ contains
     case ("slip")
        allocate(symmetry_t::object)
     case ("no_slip")
-       allocate(zero_dirichlet_t::object)
+       allocate(no_slip_t::object)
     case ("velocity_value")
        allocate(inflow_t::object)
     case default

@@ -58,7 +58,9 @@ module fluid_scheme_compressible_ns
   use compressible_residual, only : compressible_rhs_t, compressible_rhs_factory
   use neko_config, only : NEKO_BCKND_DEVICE
   use runge_kutta_time_scheme, only : runge_kutta_time_scheme_t
-  use bc_list, only : bc_list_t
+  use scalar_bc, only : scalar_bc_t
+  use vector_bc, only : vector_bc_t
+  use scalar_bc_list, only : scalar_bc_list_t
   use bc, only : bc_t
   use utils, only : neko_error, neko_type_error
   use logger, only : LOG_SIZE, neko_log
@@ -95,7 +97,7 @@ module fluid_scheme_compressible_ns
      !> Boundary conditions projector for velocity constraints.
      type(coupled_vector_bc_projector_t):: bcs_vel_projector
      !> List of boundary conditions for density.
-     type(bc_list_t) :: bcs_density
+     type(scalar_bc_list_t) :: bcs_density
 
    contains
      procedure, pass(this) :: init => fluid_scheme_compressible_ns_init
@@ -118,7 +120,7 @@ module fluid_scheme_compressible_ns
      !! @param[in] coef SEM coefficients.
      !! @param[in] user The user interface.
      module subroutine density_bc_factory(object, scheme, json, coef, user)
-       class(bc_t), pointer, intent(inout) :: object
+       class(scalar_bc_t), pointer, intent(inout) :: object
        type(fluid_scheme_compressible_ns_t), intent(in) :: scheme
        type(json_file), intent(inout) :: json
        type(coef_t), intent(in) :: coef
@@ -135,7 +137,7 @@ module fluid_scheme_compressible_ns
      !! @param[in] coef SEM coefficients.
      !! @param[in] user The user interface.
      module subroutine pressure_bc_factory(object, scheme, json, coef, user)
-       class(bc_t), pointer, intent(inout) :: object
+       class(scalar_bc_t), pointer, intent(inout) :: object
        type(fluid_scheme_compressible_ns_t), intent(inout) :: scheme
        type(json_file), intent(inout) :: json
        type(coef_t), intent(in) :: coef
@@ -152,7 +154,7 @@ module fluid_scheme_compressible_ns
      !! @param[in] coef SEM coefficients.
      !! @param[in] user The user interface.
      module subroutine velocity_bc_factory(object, scheme, json, coef, user)
-       class(bc_t), pointer, intent(inout) :: object
+       class(vector_bc_t), pointer, intent(inout) :: object
        type(fluid_scheme_compressible_ns_t), intent(in) :: scheme
        type(json_file), intent(inout) :: json
        type(coef_t), intent(in) :: coef
@@ -444,7 +446,8 @@ contains
     type(user_t), target, intent(in) :: user
     type(json_file), intent(inout) :: params
     integer :: i, n_bcs, zone_index, j, zone_size, global_zone_size, ierr
-    class(bc_t), pointer :: bc_i
+    class(scalar_bc_t), pointer :: scalar_bc_i
+    class(vector_bc_t), pointer :: vector_bc_i
     type(json_core) :: core
     type(json_value), pointer :: bc_object
     type(json_file) :: bc_subdict
@@ -482,13 +485,14 @@ contains
           end do
 
           ! Create BC
-          bc_i => null()
-          call velocity_bc_factory(bc_i, this, bc_subdict, this%c_Xh, user)
+          vector_bc_i => null()
+          call velocity_bc_factory(vector_bc_i, this, bc_subdict, &
+               this%c_Xh, user)
 
           ! Add to appropriate lists
-          if (associated(bc_i)) then
-             call this%bcs_vel_projector%mark(bc_i)
-             call this%bcs_vel%append(bc_i)
+          if (associated(vector_bc_i)) then
+             call this%bcs_vel_projector%mark(vector_bc_i)
+             call this%bcs_vel%append(vector_bc_i)
           end if
        end do
 
@@ -500,13 +504,14 @@ contains
        do i = 1, n_bcs
           ! Create a new json containing just the subdict for this bc
           call json_extract_item(core, bc_object, i, bc_subdict)
-          bc_i => null()
-          call pressure_bc_factory(bc_i, this, bc_subdict, this%c_Xh, user)
+          scalar_bc_i => null()
+          call pressure_bc_factory(scalar_bc_i, this, bc_subdict, &
+               this%c_Xh, user)
 
           ! Not all bcs require an allocation for pressure in particular,
           ! so we check.
-          if (associated(bc_i)) then
-             call this%bcs_prs%append(bc_i)
+          if (associated(scalar_bc_i)) then
+             call this%bcs_prs%append(scalar_bc_i)
           end if
        end do
 
@@ -518,13 +523,14 @@ contains
        do i = 1, n_bcs
           ! Create a new json containing just the subdict for this bc
           call json_extract_item(core, bc_object, i, bc_subdict)
-          bc_i => null()
-          call density_bc_factory(bc_i, this, bc_subdict, this%c_Xh, user)
+          scalar_bc_i => null()
+          call density_bc_factory(scalar_bc_i, this, bc_subdict, &
+               this%c_Xh, user)
 
-          ! Not all bcs require an allocation for pressure in particular,
+          ! Not all bcs require an allocation for density in particular,
           ! so we check.
-          if (associated(bc_i)) then
-             call this%bcs_density%append(bc_i)
+          if (associated(scalar_bc_i)) then
+             call this%bcs_density%append(scalar_bc_i)
           end if
        end do
     else

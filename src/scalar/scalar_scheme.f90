@@ -47,6 +47,7 @@ module scalar_scheme
   use sx_jacobi, only : sx_jacobi_t
   use hsmg, only : hsmg_t
   use bc_list, only : bc_list_t
+  use scalar_bc_list, only : scalar_bc_list_t
   use bc, only : bc_t
   use precon, only : pc_t, precon_allocator, precon_destroy
   use mesh, only : mesh_t
@@ -108,7 +109,7 @@ module scalar_scheme
      !> Preconditioner.
      class(pc_t), allocatable :: pc
      !> List of boundary conditions, including the user one.
-     type(bc_list_t) :: bcs
+     type(scalar_bc_list_t) :: bcs
      !> Case parameters.
      type(json_file), pointer :: params => null()
      !> Mesh.
@@ -641,7 +642,7 @@ contains
     type(coef_t), target, intent(in) :: coef
     type(dofmap_t), target, intent(in) :: dof
     type(gs_t), target, intent(inout) :: gs
-    type(bc_list_t), target, intent(inout) :: bclst
+    class(bc_list_t), target, intent(inout) :: bclst
     character(len=*) :: pctype
     type(json_file), intent(inout) :: pcparams
 

@@ -50,17 +50,17 @@ module facet_normal
   implicit none
   private
 
-  !> Dirichlet condition in facet normal direction
+  !> Dirichlet condition in facet normal direction.
+  !! @details This condition constrains neither a scalar nor a vector field
+  !! through the usual apply interface: it contracts a surface vector with the
+  !! facet normals through `apply_surfvec`. It therefore extends `bc_t`
+  !! directly and only borrows its masking and marking machinery.
   type, public, extends(bc_t) :: facet_normal_t
      integer, allocatable :: unique_mask(:)
      integer, allocatable :: msk_to_unique(:)
      type(c_ptr) :: unique_mask_d = c_null_ptr
      type(vector_t) :: nx, ny, nz, work
    contains
-     procedure, pass(this) :: apply_scalar => facet_normal_apply_scalar
-     procedure, pass(this) :: apply_scalar_dev => facet_normal_apply_scalar_dev
-     procedure, pass(this) :: apply_vector => facet_normal_apply_vector
-     procedure, pass(this) :: apply_vector_dev => facet_normal_apply_vector_dev
      procedure, pass(this) :: apply_surfvec => facet_normal_apply_surfvec
      procedure, pass(this) :: apply_surfvec_dev => &
           facet_normal_apply_surfvec_dev
@@ -99,49 +99,6 @@ contains
     call this%init_base(coef)
     this%bc_type = BC_DIRICHLET
   end subroutine facet_normal_init_from_components
-
-  !> No-op scalar apply
-  subroutine facet_normal_apply_scalar(this, x, n, time, strong)
-    class(facet_normal_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-  end subroutine facet_normal_apply_scalar
-
-  !> No-op scalar apply on device
-  subroutine facet_normal_apply_scalar_dev(this, x_d, time, strong, strm)
-    class(facet_normal_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-
-  end subroutine facet_normal_apply_scalar_dev
-
-  !> No-op vector apply on device
-  subroutine facet_normal_apply_vector_dev(this, x_d, y_d, z_d, time, &
-       strong, strm)
-    class(facet_normal_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-
-  end subroutine facet_normal_apply_vector_dev
-
-  !> No-op vector apply
-  subroutine facet_normal_apply_vector(this, x, y, z, n, time, strong)
-    class(facet_normal_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-  end subroutine facet_normal_apply_vector
 
   !> Apply in facet normal direction (vector valued)
   subroutine facet_normal_apply_surfvec(this, x, y, z, u, v, w, n, time)

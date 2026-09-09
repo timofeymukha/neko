@@ -36,7 +36,8 @@ module dong_outflow
   use dirichlet, only : dirichlet_t
   use device, only : device_memcpy, device_alloc, HOST_TO_DEVICE, device_free
   use num_types, only : rp, c_rp
-  use bc, only : bc_t, BC_DIRICHLET
+  use scalar_bc, only : scalar_bc_t
+  use bc, only : BC_DIRICHLET
   use field, only : field_t
   use dofmap, only : dofmap_t
   use coefs, only : coef_t
@@ -57,7 +58,7 @@ module dong_outflow
   !! "A Convective-like Energy-Stable Open Boundary Condition for
   !! Simulations of Incompressible Flows"
   !! by S. Dong
-  type, public, extends(bc_t) :: dong_outflow_t
+  type, public, extends(scalar_bc_t) :: dong_outflow_t
      type(field_t), pointer :: u
      type(field_t), pointer :: v
      type(field_t), pointer :: w
@@ -68,9 +69,7 @@ module dong_outflow
      type(c_ptr) :: normal_z_d = c_null_ptr
    contains
      procedure, pass(this) :: apply_scalar => dong_outflow_apply_scalar
-     procedure, pass(this) :: apply_vector => dong_outflow_apply_vector
      procedure, pass(this) :: apply_scalar_dev => dong_outflow_apply_scalar_dev
-     procedure, pass(this) :: apply_vector_dev => dong_outflow_apply_vector_dev
      !> Constructor
      procedure, pass(this) :: init => dong_outflow_init
      !> Destructor.
@@ -137,19 +136,6 @@ contains
   end subroutine dong_outflow_apply_scalar
 
   !> Boundary condition apply for a generic Dirichlet condition
-  !! to vectors @a x, @a y and @a z
-  subroutine dong_outflow_apply_vector(this, x, y, z, n, time, strong)
-    class(dong_outflow_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-
-  end subroutine dong_outflow_apply_vector
-
-  !> Boundary condition apply for a generic Dirichlet condition
   !! to a vector @a x (device version)
   subroutine dong_outflow_apply_scalar_dev(this, x_d, time, strong, strm)
     class(dong_outflow_t), intent(inout), target :: this
@@ -174,23 +160,6 @@ contains
     end if
 
   end subroutine dong_outflow_apply_scalar_dev
-
-  !> Boundary condition apply for a generic Dirichlet condition
-  !! to vectors @a x, @a y and @a z (device version)
-  subroutine dong_outflow_apply_vector_dev(this, x_d, y_d, z_d, time, &
-       strong, strm)
-    class(dong_outflow_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-
-    !call device_dong_outflow_apply_vector(this%msk_d, x_d, y_d, z_d, &
-    !                                   this%g, size(this%msk))
-
-  end subroutine dong_outflow_apply_vector_dev
 
   !> Destructor
   subroutine dong_outflow_free(this)

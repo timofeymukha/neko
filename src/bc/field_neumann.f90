@@ -34,11 +34,12 @@
 module field_neumann
   use num_types, only : rp
   use coefs, only : coef_t
-  use bc, only : bc_t, BC_NEUMANN
+  use scalar_bc, only : scalar_bc_t
+  use bc, only : BC_NEUMANN
   use field, only : field_t
   use field_list, only : field_list_t
   use vector, only : vector_t
-  use utils, only : neko_error, nonlinear_index
+  use utils, only : nonlinear_index
   use json_module, only : json_file
   use json_utils, only : json_get
   use math, only : masked_gather_copy_0
@@ -56,7 +57,7 @@ module field_neumann
   !! to the user routine and can be populated with arbitrary values. The
   !! boundary condition then gathers these values at the bc mask locations
   !! into a compact flux vector and applies the weak neumann contribution.
-  type, public, extends(bc_t) :: field_neumann_t
+  type, public, extends(scalar_bc_t) :: field_neumann_t
      !> A dummy field which can be manipulated by the user to set flux values.
      type(field_t) :: field_bc
      !> A field list, which just stores `field_bc`, for convenience.
@@ -77,10 +78,6 @@ module field_neumann
      procedure, pass(this) :: finalize => field_neumann_finalize
      !> Apply scalar by adding weak neumann contribution.
      procedure, pass(this) :: apply_scalar => field_neumann_apply_scalar
-     !> (No-op) Apply vector.
-     procedure, pass(this) :: apply_vector => field_neumann_apply_vector
-     !> (No-op) Apply vector (device).
-     procedure, pass(this) :: apply_vector_dev => field_neumann_apply_vector_dev
      !> Apply scalar (device).
      procedure, pass(this) :: apply_scalar_dev => field_neumann_apply_scalar_dev
      !> Gather flux values at masked points.
@@ -255,35 +252,6 @@ contains
     end if
 
   end subroutine field_neumann_apply_scalar_dev
-
-  !> (No-op) Apply vector.
-  subroutine field_neumann_apply_vector(this, x, y, z, n, time, strong)
-    class(field_neumann_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-
-    call neko_error("field_neumann cannot apply vector BCs.")
-
-  end subroutine field_neumann_apply_vector
-
-  !> (No-op) Apply vector (device).
-  subroutine field_neumann_apply_vector_dev(this, x_d, y_d, z_d, time, &
-       strong, strm)
-    class(field_neumann_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-
-    call neko_error("field_neumann cannot apply vector BCs.")
-
-  end subroutine field_neumann_apply_vector_dev
 
   !> Finalize.
   subroutine field_neumann_finalize(this)

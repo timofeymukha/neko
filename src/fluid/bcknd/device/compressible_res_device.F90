@@ -50,7 +50,7 @@ module compressible_res_device
        compressible_ops_device_ns_flux_temperature
   use device_math, only : device_copy, device_rone, device_col2, &
        device_cmult, device_sub2, device_add2
-  use bc_list, only : bc_list_t
+  use vector_bc_list, only : vector_bc_list_t
   use time_state, only : time_state_t
 
   type, public, extends(compressible_rhs_t) :: compressible_res_device_t
@@ -422,7 +422,7 @@ contains
     class(Ax_t), intent(inout) :: Ax, Ax_stress
     type(coef_t), intent(inout) :: coef
     type(gs_t), intent(inout) :: gs
-    type(bc_list_t), intent(inout) :: bcs_vel
+    type(vector_bc_list_t), intent(inout) :: bcs_vel
     type(time_state_t), intent(in) :: time
     class(runge_kutta_time_scheme_t), intent(in) :: rk_scheme
     real(kind=rp), intent(in) :: dt

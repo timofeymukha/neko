@@ -16,8 +16,8 @@ module test_coupled_bc_projector
   use dofmap, only : dofmap_t
   use gather_scatter, only : gs_t
   use scratch_registry, only : neko_scratch_registry
-  use dirichlet, only : dirichlet_t
-  use bc_list, only : bc_list_t
+  use inflow, only : inflow_t
+  use vector_bc_list, only : vector_bc_list_t
   use symmetry, only : symmetry_t
   use non_normal, only : non_normal_t
   use bc, only : bc_t
@@ -63,10 +63,10 @@ contains
     type(coef_t) :: coef
     type(dofmap_t) :: dof
     type(gs_t) :: gs
-    type(dirichlet_t) :: dirichlet_bcs(6)
+    type(inflow_t) :: dirichlet_bcs(6)
     type(symmetry_t) :: symmetry_bcs(6)
     type(non_normal_t) :: non_normal_bcs(6)
-    type(bc_list_t) :: bclst
+    type(vector_bc_list_t) :: bclst
     class(bc_t), pointer :: bc_ptr
     integer :: zone_idx, i, j
     integer, dimension(9) :: face1_dofs, face1_dofmap
@@ -335,10 +335,10 @@ contains
     type(coef_t) :: coef
     type(dofmap_t) :: dof
     type(gs_t) :: gs
-    type(dirichlet_t) :: dirichlet_bcs(6)
+    type(inflow_t) :: dirichlet_bcs(6)
     type(symmetry_t) :: symmetry_bcs(6)
     type(non_normal_t) :: non_normal_bcs(6)
-    type(bc_list_t) :: bclst
+    type(vector_bc_list_t) :: bclst
     type(coupled_vector_bc_projector_t) :: bc_projector
     real(kind=rp), allocatable :: x(:), y(:), z(:)
     integer :: zone_idx, dof_size
@@ -404,10 +404,10 @@ contains
     type(coef_t) :: coef
     type(dofmap_t) :: dof
     type(gs_t) :: gs
-    type(dirichlet_t) :: dirichlet_bcs(6)
+    type(inflow_t) :: dirichlet_bcs(6)
     type(symmetry_t) :: symmetry_bcs(6)
     type(non_normal_t) :: non_normal_bcs(6)
-    type(bc_list_t) :: bclst
+    type(vector_bc_list_t) :: bclst
     type(coupled_vector_bc_projector_t) :: bc_projector
     real(kind=rp), allocatable :: x(:), y(:), z(:)
     real(kind=rp) :: normal_component, n_dot_t1, n_dot_t2, t1_dot_t2
@@ -484,10 +484,10 @@ contains
     type(coef_t) :: coef
     type(dofmap_t) :: dof
     type(gs_t) :: gs
-    type(dirichlet_t) :: dirichlet_bcs(6)
+    type(inflow_t) :: dirichlet_bcs(6)
     type(symmetry_t) :: symmetry_bcs(6)
     type(non_normal_t) :: non_normal_bcs(6)
-    type(bc_list_t) :: bclst
+    type(vector_bc_list_t) :: bclst
     type(coupled_vector_bc_projector_t) :: bc_projector
     real(kind=rp), allocatable :: x(:), y(:), z(:)
     real(kind=rp) :: tangential_value(3)
@@ -547,10 +547,10 @@ contains
     type(coef_t) :: coef
     type(dofmap_t) :: dof
     type(gs_t) :: gs
-    type(dirichlet_t) :: dirichlet_bcs(6)
+    type(inflow_t) :: dirichlet_bcs(6)
     type(symmetry_t) :: symmetry_bcs(6)
     type(non_normal_t) :: non_normal_bcs(6)
-    type(bc_list_t) :: bclst
+    type(vector_bc_list_t) :: bclst
     type(coupled_vector_bc_projector_t) :: bc_projector
     integer :: zone_idx
 
@@ -593,10 +593,10 @@ contains
     type(coef_t) :: coef
     type(dofmap_t) :: dof
     type(gs_t) :: gs
-    type(dirichlet_t) :: dirichlet_bcs(6)
+    type(inflow_t) :: dirichlet_bcs(6)
     type(symmetry_t) :: symmetry_bcs(6)
     type(non_normal_t) :: non_normal_bcs(6)
-    type(bc_list_t) :: bclst
+    type(vector_bc_list_t) :: bclst
     type(coupled_vector_bc_projector_t) :: bc_projector
     real(kind=rp) :: tangential_value(3)
     integer :: zone_idx, i, global_idx, projector_idx
@@ -671,10 +671,10 @@ contains
     type(coef_t) :: coef
     type(dofmap_t) :: dof
     type(gs_t) :: gs
-    type(dirichlet_t) :: dirichlet_bcs(6)
+    type(inflow_t) :: dirichlet_bcs(6)
     type(symmetry_t) :: symmetry_bcs(6)
     type(non_normal_t) :: non_normal_bcs(6)
-    type(bc_list_t) :: bclst
+    type(vector_bc_list_t) :: bclst
     type(coupled_vector_bc_projector_t) :: bc_projector
     integer :: zone_idx, mixed_size, dirichlet_size, center_idx
     real(kind=rp) :: normal_before(3)
@@ -728,10 +728,10 @@ contains
     type(coef_t) :: coef
     type(dofmap_t) :: dof
     type(gs_t) :: gs
-    type(dirichlet_t) :: dirichlet_bcs(6)
+    type(inflow_t) :: dirichlet_bcs(6)
     type(symmetry_t) :: symmetry_bcs(6)
     type(non_normal_t) :: non_normal_bcs(6)
-    type(bc_list_t) :: bclst
+    type(vector_bc_list_t) :: bclst
     type(coupled_vector_bc_projector_t) :: bc_projector
     integer :: shared_idx, symmetry_center
 
@@ -765,20 +765,22 @@ contains
   end subroutine test_two_element_shared_face
 
   subroutine append_dirichlet_bc(bclst, bc, coef, zone_idx, value)
-    type(bc_list_t), intent(inout) :: bclst
-    type(dirichlet_t), intent(inout), target :: bc
+    type(vector_bc_list_t), intent(inout) :: bclst
+    type(inflow_t), intent(inout), target :: bc
     type(coef_t), target, intent(in) :: coef
     integer, intent(in) :: zone_idx
     real(kind=rp), intent(in) :: value
 
-    call bc%init_from_components(coef, value)
+    ! The projector only reads bc_type and the masks, so the same value on
+    ! all three components is enough.
+    call bc%init_from_components(coef, [value, value, value])
     call bc%mark_labeled_zone(zone_idx)
     call bc%finalize()
     call bclst%append(bc)
   end subroutine append_dirichlet_bc
 
   subroutine append_symmetry_bc(bclst, bc, coef, zone_idx)
-    type(bc_list_t), intent(inout) :: bclst
+    type(vector_bc_list_t), intent(inout) :: bclst
     type(symmetry_t), intent(inout), target :: bc
     type(coef_t), target, intent(in) :: coef
     integer, intent(in) :: zone_idx
@@ -790,7 +792,7 @@ contains
   end subroutine append_symmetry_bc
 
   subroutine append_non_normal_bc(bclst, bc, coef, zone_idx, value)
-    type(bc_list_t), intent(inout) :: bclst
+    type(vector_bc_list_t), intent(inout) :: bclst
     type(non_normal_t), intent(inout), target :: bc
     type(coef_t), target, intent(in) :: coef
     integer, intent(in) :: zone_idx
@@ -884,8 +886,8 @@ contains
   end subroutine free_reference_case
 
   subroutine free_bc_objects(bclst, dirichlet_bcs, symmetry_bcs, non_normal_bcs)
-    type(bc_list_t), intent(inout) :: bclst
-    type(dirichlet_t), intent(inout) :: dirichlet_bcs(6)
+    type(vector_bc_list_t), intent(inout) :: bclst
+    type(inflow_t), intent(inout) :: dirichlet_bcs(6)
     type(symmetry_t), intent(inout) :: symmetry_bcs(6)
     type(non_normal_t), intent(inout) :: non_normal_bcs(6)
     integer :: zone_idx

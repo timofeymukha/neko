@@ -42,8 +42,8 @@ module overset_interface_vector
        global_interpolation_settings_t
   use mask, only : mask_t
   use dofmap, only : dofmap_t
-  use bc, only : bc_t, BC_DIRICHLET
-  use bc_list, only : bc_list_t
+  use vector_bc, only : vector_bc_t
+  use bc, only : BC_DIRICHLET
   use utils, only : split_string
   use field, only : field_t
   use field_list, only : field_list_t
@@ -79,7 +79,7 @@ module overset_interface_vector
 
   !> Extension of the user defined dirichlet condition `overset_interface`
   ! for the application on a vector field.
-  type, public, extends(bc_t) :: overset_interface_vector_t
+  type, public, extends(vector_bc_t) :: overset_interface_vector_t
      ! The bc for the first compoent.
      type(field_dirichlet_t) :: bc_u
      ! The bc for the second compoent.
@@ -123,18 +123,12 @@ module overset_interface_vector
      procedure, pass(this) :: free => overset_interface_vector_free
      !> Finalize.
      procedure, pass(this) :: finalize => overset_interface_vector_finalize
-     !> Apply scalar by performing a masked copy.
-     procedure, pass(this) :: apply_scalar => &
-          overset_interface_vector_apply_scalar
      !> (No-op) Apply vector.
      procedure, pass(this) :: apply_vector => &
           overset_interface_vector_apply_vector
      !> (No-op) Apply vector (device).
      procedure, pass(this) :: apply_vector_dev => &
           overset_interface_vector_apply_vector_dev
-     !> Apply scalar (device).
-     procedure, pass(this) :: apply_scalar_dev => &
-          overset_interface_vector_apply_scalar_dev
      procedure, pass(this) :: update => overset_interface_update
 
      !> Build the masks for the overset interface.
@@ -272,38 +266,6 @@ contains
     !   nullify(this%update_)
     !end if
   end subroutine overset_interface_vector_free
-
-  !> No-op apply scalar.
-  !! @param x Field onto which to copy the values (e.g. u,v,w,p or s).
-  !! @param n Size of the array `x`.
-  !! @param t Current time state.
-  subroutine overset_interface_vector_apply_scalar(this, x, n, time, strong)
-    class(overset_interface_vector_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-
-    call neko_error("overset_interface_vector cannot apply scalar BCs.&
-    & Use overset_interface_vector::apply_vector instead!")
-
-  end subroutine overset_interface_vector_apply_scalar
-
-  !> No-op apply scalar (device).
-  !! @param x_d Device pointer to the field onto which to copy the values.
-  !! @param time The current time state.
-  subroutine overset_interface_vector_apply_scalar_dev(this, x_d, time, &
-       strong, strm)
-    class(overset_interface_vector_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-
-    call neko_error("overset_interface_vector cannot apply scalar BCs.&
-    & Use overset_interface_vector::apply_vector instead!")
-
-  end subroutine overset_interface_vector_apply_scalar_dev
 
   !> Apply the boundary condition to a vector field.
   !! @param x x-component of the field onto which to apply the values.

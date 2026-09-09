@@ -30,12 +30,14 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-!> Defines no-slip boundary condition (extends zero_dirichlet)
+!> Defines a no-slip wall boundary condition.
 module no_slip
   use num_types, only : rp
   use coefs, only : coef_t
   use field, only : field_t
-  use zero_dirichlet, only : zero_dirichlet_t
+  use vector_bc, only : vector_bc_t
+  use bc, only : BC_DIRICHLET
+  use device_zero_dirichlet, only : device_zero_dirichlet_apply_vector
   use json_module, only : json_file
   use json_utils, only : json_get_or_default
   use time_state, only : time_state_t
@@ -47,7 +49,11 @@ module no_slip
   implicit none
   private
 
-  type, public, extends(zero_dirichlet_t) :: no_slip_t
+  !> No-slip wall boundary condition.
+  !! @details For a stationary wall the three velocity components are zeroed
+  !! on the mask. For a moving wall the mesh velocity is copied onto the mask
+  !! instead, which requires ALE to be active.
+  type, public, extends(vector_bc_t) :: no_slip_t
      ! mesh velocity fields.
      type(field_t), pointer :: wx => null()
      type(field_t), pointer :: wy => null()
@@ -55,20 +61,25 @@ module no_slip
      logical :: is_moving = .false.
    contains
      procedure, pass(this) :: init => no_slip_init
+     procedure, pass(this) :: init_from_components => &
+          no_slip_init_from_components
      procedure, pass(this) :: apply_vector => no_slip_apply_vector
      procedure, pass(this) :: apply_vector_dev => no_slip_apply_vector_dev
      procedure, pass(this) :: free => no_slip_free
+     procedure, pass(this) :: finalize => no_slip_finalize
   end type no_slip_t
 
 contains
 
+  !> Constructor from JSON.
+  !! @param[in] coef The SEM coefficients.
+  !! @param[inout] json The JSON object configuring the boundary condition.
   subroutine no_slip_init(this, coef, json)
     class(no_slip_t), intent(inout), target :: this
     type(coef_t), intent(in), target :: coef
     type(json_file), intent(inout) :: json
 
-    ! Normal init (zero_dirichlet)
-    call this%zero_dirichlet_t%init(coef, json)
+    call this%init_from_components(coef)
     call json_get_or_default(json, "moving", this%is_moving, .false.)
 
     ! If wm_x exists, wm_y and wm_z also exist!
@@ -89,6 +100,15 @@ contains
     end if
   end subroutine no_slip_init
 
+  !> Constructor from components.
+  !! @param[in] coef The SEM coefficients.
+  subroutine no_slip_init_from_components(this, coef)
+    class(no_slip_t), intent(inout), target :: this
+    type(coef_t), intent(in), target :: coef
+
+    call this%init_base(coef)
+    this%bc_type = BC_DIRICHLET
+  end subroutine no_slip_init_from_components
 
   subroutine no_slip_apply_vector(this, x, y, z, n, time, strong)
     class(no_slip_t), intent(inout) :: this
@@ -97,6 +117,7 @@ contains
     type(time_state_t), intent(in), optional :: time
     logical, intent(in), optional :: strong
     logical :: strong_
+    integer :: i, m, k
 
     strong_ = .true.
     if (present(strong)) strong_ = strong
@@ -108,10 +129,18 @@ contains
        call masked_copy_0(y, this%wy%x, this%msk, n, this%msk(0))
        call masked_copy_0(z, this%wz%x, this%msk, n, this%msk(0))
     else
-       call this%zero_dirichlet_t%apply_vector(x, y, z, n, time, strong_)
+       ! stationary wall: u_wall = 0
+       m = this%msk(0)
+       !$omp do
+       do i = 1, m
+          k = this%msk(i)
+          x(k) = 0.0_rp
+          y(k) = 0.0_rp
+          z(k) = 0.0_rp
+       end do
+       !$omp end do
     end if
   end subroutine no_slip_apply_vector
-
 
   subroutine no_slip_apply_vector_dev(this, x_d, y_d, z_d, time, strong, strm)
     class(no_slip_t), intent(inout), target :: this
@@ -132,20 +161,25 @@ contains
             this%wy%dof%size(), this%msk(0), strm)
        call device_masked_copy_0(z_d, this%wz%x_d, this%msk_d, &
             this%wz%dof%size(), this%msk(0), strm)
-    else
-       call this%zero_dirichlet_t%apply_vector_dev(x_d, y_d, z_d, time, &
-            strong_, strm)
+    else if (this%msk(0) .gt. 0) then
+       call device_zero_dirichlet_apply_vector(this%msk_d, x_d, y_d, z_d, &
+            size(this%msk), strm)
     end if
   end subroutine no_slip_apply_vector_dev
-
 
   subroutine no_slip_free(this)
     class(no_slip_t), intent(inout), target :: this
 
-    call this%zero_dirichlet_t%free()
+    call this%free_base()
     nullify(this%wx)
     nullify(this%wy)
     nullify(this%wz)
   end subroutine no_slip_free
+
+  subroutine no_slip_finalize(this)
+    class(no_slip_t), intent(inout), target :: this
+
+    call this%finalize_base()
+  end subroutine no_slip_finalize
 
 end module no_slip

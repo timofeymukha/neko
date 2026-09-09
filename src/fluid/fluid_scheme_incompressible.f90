@@ -44,6 +44,7 @@ module fluid_scheme_incompressible
   use krylov, only : ksp_t, krylov_solver_factory, KSP_MAX_ITER
   use coefs, only : coef_t
   use dirichlet, only : dirichlet_t
+  use vector_bc, only : vector_bc_t
   use jacobi, only : jacobi_t
   use sx_jacobi, only : sx_jacobi_t
   use device_jacobi, only : device_jacobi_t
@@ -472,6 +473,7 @@ contains
     logical, intent(in) :: strong
     integer :: i
     class(bc_t), pointer :: b
+    class(vector_bc_t), pointer :: vb
 
     call this%bcs_vel%apply_vector(&
          this%u%x, this%v%x, this%w%x, this%dm_Xh%size(), time, strong)
@@ -486,11 +488,11 @@ contains
     call rotate_cyc(this%u, this%v, this%w, 0, this%c_Xh)
 
     ! Double pass for Dirichlet bcs only.
-    b => null()
+    vb => null()
     do i = 1, this%bcs_vel%size()
-       b => this%bcs_vel%get(i)
-       if (b%bc_type .eq. BC_DIRICHLET) then
-          call b%apply_vector_generic(this%u, this%v, this%w,time, strong)
+       vb => this%bcs_vel%get_vector(i)
+       if (vb%bc_type .eq. BC_DIRICHLET) then
+          call vb%apply_vector_generic(this%u, this%v, this%w, time, strong)
        end if
     end do
 
@@ -503,11 +505,12 @@ contains
     call device_event_sync(glb_cmd_event)
     call rotate_cyc(this%u, this%v, this%w, 0, this%c_Xh)
 
+    b => null()
     do i = 1, this%bcs_vel%size()
        b => this%bcs_vel%get(i)
        b%updated = .false.
     end do
-    nullify(b)
+    nullify(b, vb)
 
   end subroutine fluid_scheme_bc_apply_vel
 
@@ -562,7 +565,7 @@ contains
     type(coef_t), target, intent(in) :: coef
     type(dofmap_t), target, intent(in) :: dof
     type(gs_t), target, intent(inout) :: gs
-    type(bc_list_t), target, intent(inout) :: bclst
+    class(bc_list_t), target, intent(inout) :: bclst
     character(len=*) :: pctype
     type(json_file), intent(inout) :: pcparams
 

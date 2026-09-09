@@ -36,7 +36,8 @@
 !! mixed boundary conditions.
 module vector_bc_projector
   use bc, only : bc_t, BC_DIRICHLET
-  use bc_list, only : bc_list_t
+  use vector_bc, only : vector_bc_t
+  use vector_bc_list, only : vector_bc_list_t
   use mixed_bc, only : mixed_bc_t
   use mask, only : mask_t
   use coefs, only : coef_t
@@ -152,7 +153,7 @@ module vector_bc_projector
      !> DOFs that require basis-aware mixed treatment.
      type(mask_t) :: mixed_dof_mask
      !> Boundary conditions queued for resolution during `finalize()`.
-     type(bc_list_t), private :: bcs
+     type(vector_bc_list_t), private :: bcs
      !> SEM coefficients.
      type(coef_t), pointer, private :: coef => null()
      !> Degree-of-freedom map.
@@ -273,9 +274,9 @@ module vector_bc_projector
      !> Mark a boundary condition in the vector boundary-condition projector.
      !! @param[inout] bc Boundary condition to register.
      subroutine vector_bc_projector_mark_bc_intrf(this, bc)
-       import :: vector_bc_projector_t, bc_t
+       import :: vector_bc_projector_t, vector_bc_t
        class(vector_bc_projector_t), intent(inout) :: this
-       class(bc_t), intent(inout), target :: bc
+       class(vector_bc_t), intent(inout), target :: bc
      end subroutine vector_bc_projector_mark_bc_intrf
   end interface
 
@@ -283,9 +284,9 @@ module vector_bc_projector
      !> Mark a list of boundary conditions in the projector.
      !! @param[in] bclst Boundary-condition list to register.
      subroutine vector_bc_projector_mark_bc_list_intrf(this, bclst)
-       import :: vector_bc_projector_t, bc_list_t
+       import :: vector_bc_projector_t, vector_bc_list_t
        class(vector_bc_projector_t), intent(inout) :: this
-       type(bc_list_t), intent(in) :: bclst
+       type(vector_bc_list_t), intent(in) :: bclst
      end subroutine vector_bc_projector_mark_bc_list_intrf
   end interface
 
@@ -306,7 +307,7 @@ contains
   subroutine vector_bc_projector_mark_bc_list_component(this, &
        bclst, component)
     class(vector_bc_projector_t), intent(inout) :: this
-    type(bc_list_t), intent(in) :: bclst
+    type(vector_bc_list_t), intent(in) :: bclst
     character(len=1), intent(in) :: component
 
     call neko_error("Component-specific marking is only supported by " // &
@@ -343,7 +344,7 @@ contains
   !! @param[inout] bc Boundary condition to register.
   subroutine segregated_vector_bc_projector_mark_bc(this, bc)
     class(segregated_vector_bc_projector_t), intent(inout) :: this
-    class(bc_t), intent(inout), target :: bc
+    class(vector_bc_t), intent(inout), target :: bc
 
     if (bc%bc_type .ne. BC_DIRICHLET) then
        call neko_error("Segregated vector BC projector only accepts " // &
@@ -386,12 +387,12 @@ contains
   !! @param[in] bclst Boundary-condition list to register.
   subroutine segregated_vector_bc_projector_mark_bc_list(this, bclst)
     class(segregated_vector_bc_projector_t), intent(inout) :: this
-    type(bc_list_t), intent(in) :: bclst
-    class(bc_t), pointer :: bc_i
+    type(vector_bc_list_t), intent(in) :: bclst
+    class(vector_bc_t), pointer :: bc_i
     integer :: i
 
     do i = 1, bclst%size()
-       bc_i => bclst%get(i)
+       bc_i => bclst%get_vector(i)
        call this%mark(bc_i)
     end do
   end subroutine segregated_vector_bc_projector_mark_bc_list
@@ -402,7 +403,7 @@ contains
   subroutine segregated_vector_bc_projector_mark_bc_list_component(this, &
        bclst, component)
     class(segregated_vector_bc_projector_t), intent(inout) :: this
-    type(bc_list_t), intent(in) :: bclst
+    type(vector_bc_list_t), intent(in) :: bclst
     character(len=1), intent(in) :: component
     class(bc_t), pointer :: bc_i
     integer :: i
@@ -546,7 +547,7 @@ contains
   !! @param[inout] bc Boundary condition to queue for resolution.
   subroutine coupled_vector_bc_projector_mark_bc(this, bc)
     class(coupled_vector_bc_projector_t), intent(inout) :: this
-    class(bc_t), intent(inout), target :: bc
+    class(vector_bc_t), intent(inout), target :: bc
 
     if (.not. associated(this%coef)) then
        call neko_error("Coupled vector BC projector must be initialized " // &
@@ -560,12 +561,12 @@ contains
   !! @param[in] bclst Boundary-condition list to queue.
   subroutine coupled_vector_bc_projector_mark_bc_list(this, bclst)
     class(coupled_vector_bc_projector_t), intent(inout) :: this
-    type(bc_list_t), intent(in) :: bclst
-    class(bc_t), pointer :: bc_i
+    type(vector_bc_list_t), intent(in) :: bclst
+    class(vector_bc_t), pointer :: bc_i
     integer :: i
 
     do i = 1, bclst%size()
-       bc_i => bclst%get(i)
+       bc_i => bclst%get_vector(i)
        call this%mark(bc_i)
     end do
   end subroutine coupled_vector_bc_projector_mark_bc_list

@@ -42,7 +42,8 @@ module blasius
   use utils, only : neko_error
   use, intrinsic :: iso_fortran_env
   use, intrinsic :: iso_c_binding
-  use bc, only : bc_t, BC_DIRICHLET
+  use vector_bc, only : vector_bc_t
+  use bc, only : BC_DIRICHLET
   use json_module, only : json_file
   use json_utils, only : json_get, json_get_or_lookup
   use time_state, only : time_state_t
@@ -52,7 +53,7 @@ module blasius
   !> Blasius profile for inlet (vector valued).
   !! @warning Works only with axis-aligned sugar-cube elements and assumes
   !! the boundary is alinged with zOy.
-  type, public, extends(bc_t) :: blasius_t
+  type, public, extends(vector_bc_t) :: blasius_t
      real(kind=rp), dimension(3) :: uinf = [0d0, 0d0, 0d0]
      real(kind=rp) :: delta
      procedure(blasius_profile), nopass, pointer :: bla => null()
@@ -60,9 +61,7 @@ module blasius
      type(c_ptr), private :: blay_d = C_NULL_PTR
      type(c_ptr), private :: blaz_d = C_NULL_PTR
    contains
-     procedure, pass(this) :: apply_scalar => blasius_apply_scalar
      procedure, pass(this) :: apply_vector => blasius_apply_vector
-     procedure, pass(this) :: apply_scalar_dev => blasius_apply_scalar_dev
      procedure, pass(this) :: apply_vector_dev => blasius_apply_vector_dev
      procedure, pass(this) :: set_params => blasius_set_params
      !> Constructor
@@ -160,24 +159,6 @@ contains
     end if
 
   end subroutine blasius_free
-
-  !> No-op scalar apply
-  subroutine blasius_apply_scalar(this, x, n, time, strong)
-    class(blasius_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-  end subroutine blasius_apply_scalar
-
-  !> No-op scalar apply (device version)
-  subroutine blasius_apply_scalar_dev(this, x_d, time, strong, strm)
-    class(blasius_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-  end subroutine blasius_apply_scalar_dev
 
   !> Apply blasius conditions (vector valued)
   subroutine blasius_apply_vector(this, x, y, z, n, time, strong)

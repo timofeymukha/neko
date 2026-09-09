@@ -34,7 +34,8 @@
 module symmetry_aligned
   use device_symmetry_aligned, only : device_symmetry_aligned_apply_vector
   use num_types, only : rp
-  use bc, only : bc_t, BC_MIXED_CONSTRAINS_NORMAL
+  use vector_bc, only : vector_bc_t
+  use bc, only : BC_MIXED_CONSTRAINS_NORMAL
   use tuple, only : tuple_i4_t
   use coefs, only : coef_t
   use json_module, only : json_file
@@ -48,19 +49,14 @@ module symmetry_aligned
   !! @warning Only works for axis-aligned plane boundaries.
   !! @details This variant uses nested `zero_dirichlet_t` boundary conditions to
   !! constrain the single global component normal to each marked facet.
-  type, public, extends(bc_t) :: symmetry_aligned_t
+  type, public, extends(vector_bc_t) :: symmetry_aligned_t
      !> Nested zero-Dirichlet boundary conditions for each component.
      type(zero_dirichlet_t) :: bc_x
      type(zero_dirichlet_t) :: bc_y
      type(zero_dirichlet_t) :: bc_z
    contains
-     !> No-op scalar application.
-     procedure, pass(this) :: apply_scalar => symmetry_aligned_apply_scalar
      !> Remove the normal component on the CPU.
      procedure, pass(this) :: apply_vector => symmetry_aligned_apply_vector
-     !> No-op scalar application on the device.
-     procedure, pass(this) :: apply_scalar_dev => &
-          symmetry_aligned_apply_scalar_dev
      !> Remove the normal component on the device.
      procedure, pass(this) :: apply_vector_dev => &
           symmetry_aligned_apply_vector_dev
@@ -188,19 +184,6 @@ contains
     end associate
   end subroutine symmetry_aligned_get_normal_axis
 
-  !> No-op scalar application.
-  !! @param x Scalar field values.
-  !! @param n Number of entries in `x`.
-  !! @param time Current time state.
-  !! @param strong Whether to apply the strong form.
-  subroutine symmetry_aligned_apply_scalar(this, x, n, time, strong)
-    class(symmetry_aligned_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-  end subroutine symmetry_aligned_apply_scalar
-
   !> Remove the normal component on the CPU.
   !! @details For axis-aligned facets this reduces to applying the nested
   !! zero-Dirichlet condition to the corresponding global component.
@@ -232,19 +215,6 @@ contains
        call this%bc_z%apply_scalar(z, n, strong = .true.)
     end if
   end subroutine symmetry_aligned_apply_vector
-
-  !> No-op scalar application on the device.
-  !! @param x_d Device pointer to the scalar field.
-  !! @param time Current time state.
-  !! @param strong Whether to apply the strong form.
-  !! @param strm Device stream.
-  subroutine symmetry_aligned_apply_scalar_dev(this, x_d, time, strong, strm)
-    class(symmetry_aligned_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-  end subroutine symmetry_aligned_apply_scalar_dev
 
   !> Remove the normal component on the device.
   !! @details Uses the component masks of the nested zero-Dirichlet boundary

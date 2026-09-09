@@ -34,7 +34,7 @@
 !! expressions
 module expression_dirichlet_vector
   use num_types, only : rp
-  use bc, only : bc_t
+  use vector_bc, only : vector_bc_t
   use coefs, only : coef_t
   use expression, only : expression_t, expression_check_finite, NEKO_EXPR_LEN
   use expression_dirichlet, only : expression_mask_coords
@@ -53,7 +53,7 @@ module expression_dirichlet_vector
   !! component, given in the case file.
   !! @details The vector valued counterpart of `expression_dirichlet_t`, see
   !! that type for how the expressions are evaluated and cached.
-  type, public, extends(bc_t) :: expression_dirichlet_vector_t
+  type, public, extends(vector_bc_t) :: expression_dirichlet_vector_t
      !> The compiled expressions, one per component.
      type(expression_t) :: expr(3)
      !> The values in each point of the mask, one array per component.
@@ -78,15 +78,9 @@ module expression_dirichlet_vector
      procedure, pass(this) :: free => expression_dirichlet_vector_free
      !> Finalize.
      procedure, pass(this) :: finalize => expression_dirichlet_vector_finalize
-     !> (No-op) Apply scalar.
-     procedure, pass(this) :: apply_scalar => &
-          expression_dirichlet_vector_apply_scalar
      !> Apply the condition to a vector field.
      procedure, pass(this) :: apply_vector => &
           expression_dirichlet_vector_apply_vector
-     !> (No-op) Apply scalar (device).
-     procedure, pass(this) :: apply_scalar_dev => &
-          expression_dirichlet_vector_apply_scalar_dev
      !> Apply the condition to a vector field (device).
      procedure, pass(this) :: apply_vector_dev => &
           expression_dirichlet_vector_apply_vector_dev
@@ -291,33 +285,6 @@ contains
     this%updated = .true.
 
   end subroutine expression_dirichlet_vector_update
-
-  !> (No-op) Apply scalar.
-  !! @param[inout] x The field onto which to apply the values.
-  !! @param[in] n The size of `x`.
-  !! @param[in] time The current time state.
-  !! @param[in] strong Whether the condition is applied strongly.
-  subroutine expression_dirichlet_vector_apply_scalar(this, x, n, time, strong)
-    class(expression_dirichlet_vector_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-  end subroutine expression_dirichlet_vector_apply_scalar
-
-  !> (No-op) Apply scalar (device version).
-  !! @param[inout] x_d Device pointer to the field.
-  !! @param[in] time The current time state.
-  !! @param[in] strong Whether the condition is applied strongly.
-  !! @param[inout] strm The device stream to issue the work on.
-  subroutine expression_dirichlet_vector_apply_scalar_dev(this, x_d, time, &
-       strong, strm)
-    class(expression_dirichlet_vector_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-  end subroutine expression_dirichlet_vector_apply_scalar_dev
 
   !> Apply the condition to a vector field.
   !! @param[inout] x The x-component of the field.

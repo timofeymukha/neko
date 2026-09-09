@@ -32,10 +32,10 @@
 !
 !> Defines a dirichlet boundary condition
 module dirichlet
-  use device_dirichlet, only : device_dirichlet_apply_scalar, &
-       device_dirichlet_apply_vector
+  use device_dirichlet, only : device_dirichlet_apply_scalar
   use num_types, only : rp
-  use bc, only : bc_t, BC_DIRICHLET
+  use scalar_bc, only : scalar_bc_t
+  use bc, only : BC_DIRICHLET
   use coefs, only : coef_t
   use json_module, only : json_file
   use json_utils, only : json_get_or_lookup
@@ -46,13 +46,11 @@ module dirichlet
 
   !> Generic Dirichlet boundary condition
   !! \f$ x = g \f$ on \f$\partial \Omega\f$
-  type, public, extends(bc_t) :: dirichlet_t
+  type, public, extends(scalar_bc_t) :: dirichlet_t
      real(kind=rp), private :: g
    contains
      procedure, pass(this) :: apply_scalar => dirichlet_apply_scalar
-     procedure, pass(this) :: apply_vector => dirichlet_apply_vector
      procedure, pass(this) :: apply_scalar_dev => dirichlet_apply_scalar_dev
-     procedure, pass(this) :: apply_vector_dev => dirichlet_apply_vector_dev
      procedure, pass(this) :: set_g => dirichlet_set_g
      !> Constructor from JSON.
      procedure, pass(this) :: init => dirichlet_init
@@ -124,39 +122,6 @@ contains
   end subroutine dirichlet_apply_scalar
 
   !> Boundary condition apply for a generic Dirichlet condition
-  !! to vectors @a x, @a y and @a z
-  subroutine dirichlet_apply_vector(this, x, y, z, n, time, strong)
-    class(dirichlet_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    integer :: i, m, k
-    logical :: strong_
-
-    if (present(strong)) then
-       strong_ = strong
-    else
-       strong_ = .true.
-    end if
-
-    if (strong_) then
-       m = this%msk(0)
-       !$omp do
-       do i = 1, m
-          k = this%msk(i)
-          x(k) = this%g
-          y(k) = this%g
-          z(k) = this%g
-       end do
-       !$omp end do
-    end if
-
-  end subroutine dirichlet_apply_vector
-
-  !> Boundary condition apply for a generic Dirichlet condition
   !! to a vector @a x (device version)
   subroutine dirichlet_apply_scalar_dev(this, x_d, time, strong, strm)
     class(dirichlet_t), intent(inout), target :: this
@@ -178,32 +143,6 @@ contains
     end if
 
   end subroutine dirichlet_apply_scalar_dev
-
-  !> Boundary condition apply for a generic Dirichlet condition
-  !! to vectors @a x, @a y and @a z (device version)
-  subroutine dirichlet_apply_vector_dev(this, x_d, y_d, z_d, &
-       time, strong, strm)
-    class(dirichlet_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-    logical :: strong_
-
-    if (present(strong)) then
-       strong_ = strong
-    else
-       strong_ = .true.
-    end if
-
-    if (strong_ .and. this%msk(0) .gt. 0) then
-       call device_dirichlet_apply_vector(this%msk_d, x_d, y_d, z_d, this%g, &
-            size(this%msk), strm)
-    end if
-
-  end subroutine dirichlet_apply_vector_dev
 
   !> Set value of \f$ g \f$
   subroutine dirichlet_set_g(this, g)

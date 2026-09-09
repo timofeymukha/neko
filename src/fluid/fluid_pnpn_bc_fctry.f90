@@ -90,7 +90,7 @@ contains
   !! @param coef The SEM coeffcients.
   !! @param user The user interface.
   module subroutine pressure_bc_factory(object, scheme, json, coef, user)
-    class(bc_t), pointer, intent(inout) :: object
+    class(scalar_bc_t), pointer, intent(inout) :: object
     type(fluid_pnpn_t), intent(in) :: scheme
     type(json_file), intent(inout) :: json
     type(coef_t), target, intent(in) :: coef
@@ -189,7 +189,7 @@ contains
   !! @param coef The SEM coeffcients.
   !! @param user The user interface.
   module subroutine velocity_bc_factory(object, scheme, json, coef, user)
-    class(bc_t), pointer, intent(inout) :: object
+    class(vector_bc_t), pointer, intent(inout) :: object
     type(fluid_pnpn_t), intent(inout) :: scheme
     type(json_file), intent(inout) :: json
     type(coef_t), target, intent(in) :: coef

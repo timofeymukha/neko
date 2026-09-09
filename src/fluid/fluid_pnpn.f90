@@ -78,6 +78,8 @@ module fluid_pnpn
   use utils, only : neko_error, neko_type_error
   use field_math, only : field_add2, field_copy
   use bc, only : bc_t, BC_DIRICHLET
+  use scalar_bc, only : scalar_bc_t
+  use vector_bc, only : vector_bc_t
   use mixed_bc, only : mixed_bc_t
   use scalar_bc_projector, only : scalar_bc_projector_t
   use vector_bc_projector, only : vector_bc_projector_t, &
@@ -211,7 +213,7 @@ module fluid_pnpn
      !! @param[in] coef SEM coefficients.
      !! @param[in] user The user interface.
      module subroutine pressure_bc_factory(object, scheme, json, coef, user)
-       class(bc_t), pointer, intent(inout) :: object
+       class(scalar_bc_t), pointer, intent(inout) :: object
        type(fluid_pnpn_t), intent(in) :: scheme
        type(json_file), intent(inout) :: json
        type(coef_t), target, intent(in) :: coef
@@ -228,7 +230,7 @@ module fluid_pnpn
      !! @param[in] coef SEM coefficients.
      !! @param[in] user The user interface.
      module subroutine velocity_bc_factory(object, scheme, json, coef, user)
-       class(bc_t), pointer, intent(inout) :: object
+       class(vector_bc_t), pointer, intent(inout) :: object
        type(fluid_pnpn_t), intent(inout) :: scheme
        type(json_file), intent(inout) :: json
        type(coef_t), target, intent(in) :: coef
@@ -950,7 +952,8 @@ contains
     type(user_t), target, intent(in) :: user
     type(json_file), intent(inout) :: params
     integer :: i, n_bcs, zone_index, j, zone_size, global_zone_size, ierr
-    class(bc_t), pointer :: bc_i
+    class(scalar_bc_t), pointer :: scalar_bc_i
+    class(vector_bc_t), pointer :: vector_bc_i
     type(json_core) :: core
     type(json_value), pointer :: bc_object
     type(json_file) :: bc_subdict
@@ -1033,24 +1036,28 @@ contains
              end if
           end do
 
-          bc_i => null()
-          call velocity_bc_factory(bc_i, this, bc_subdict, this%c_Xh, user)
+          vector_bc_i => null()
+          call velocity_bc_factory(vector_bc_i, this, bc_subdict, &
+               this%c_Xh, user)
 
           ! Not all bcs require an allocation for velocity in particular,
           ! so we check.
-          if (associated(bc_i)) then
+          if (associated(vector_bc_i)) then
 
-             select type (bc_i)
+             select type (vector_bc_i)
              type is (symmetry_aligned_t)
                 ! In this case we need to tell the segregated projector where
                 ! we have the dirichlet dofs component-wise. This is stored
                 ! in the nested bcs. Of course, we rely on axis-alignment of
                 ! the geometry.
-                call this%bcs_vel_projector%mark(bc_i%bc_x, component = 'x')
-                call this%bcs_vel_projector%mark(bc_i%bc_y, component = 'y')
-                call this%bcs_vel_projector%mark(bc_i%bc_z, component = 'z')
-                call this%bcs_vel%append(bc_i)
-                call this%bc_sym_surface%mark_facets(bc_i%marked_facet)
+                call this%bcs_vel_projector%mark( &
+                     vector_bc_i%bc_x, component = 'x')
+                call this%bcs_vel_projector%mark( &
+                     vector_bc_i%bc_y, component = 'y')
+                call this%bcs_vel_projector%mark( &
+                     vector_bc_i%bc_z, component = 'z')
+                call this%bcs_vel%append(vector_bc_i)
+                call this%bc_sym_surface%mark_facets(vector_bc_i%marked_facet)
              type is (symmetry_t)
                 ! In this case we add the bc itself to the projector, which
                 ! should be coupled.
@@ -1058,48 +1065,54 @@ contains
                    call neko_error("The symmetry boundary condition " // &
                         "requires the full stress formulation to be enabled.")
                 end if
-                call this%bcs_vel_projector%mark(bc_i)
-                call this%bcs_vel%append(bc_i)
-                call this%bc_sym_surface%mark_facets(bc_i%marked_facet)
+                call this%bcs_vel_projector%mark(vector_bc_i)
+                call this%bcs_vel%append(vector_bc_i)
+                call this%bc_sym_surface%mark_facets(vector_bc_i%marked_facet)
              type is (non_normal_aligned_t)
                 ! The situation is the same as symmetry.
-                call this%bcs_vel_projector%mark(bc_i%bc_x, component = 'x')
-                call this%bcs_vel_projector%mark(bc_i%bc_y, component = 'y')
-                call this%bcs_vel_projector%mark(bc_i%bc_z, component = 'z')
-                call this%bcs_vel%append(bc_i)
+                call this%bcs_vel_projector%mark( &
+                     vector_bc_i%bc_x, component = 'x')
+                call this%bcs_vel_projector%mark( &
+                     vector_bc_i%bc_y, component = 'y')
+                call this%bcs_vel_projector%mark( &
+                     vector_bc_i%bc_z, component = 'z')
+                call this%bcs_vel%append(vector_bc_i)
              type is (non_normal_t)
-                call this%bcs_vel_projector%mark(bc_i)
-                call this%bcs_vel%append(bc_i)
+                call this%bcs_vel_projector%mark(vector_bc_i)
+                call this%bcs_vel%append(vector_bc_i)
              type is (shear_stress_t)
                 if (.not. this%full_stress_formulation) then
                    call neko_error("The shear_stress boundary condition " // &
                         "requires the full stress formulation to be enabled.")
                 end if
-                call this%bcs_vel_projector%mark(bc_i)
-                call this%bcs_vel%append(bc_i)
+                call this%bcs_vel_projector%mark(vector_bc_i)
+                call this%bcs_vel%append(vector_bc_i)
              type is (wall_model_bc_t)
                 if (.not. this%full_stress_formulation) then
                    call neko_error("The wall_model boundary condition " // &
                         "requires the full stress formulation to be enabled.")
                 end if
-                call this%bcs_vel_projector%mark(bc_i)
-                call this%bcs_vel%append(bc_i)
+                call this%bcs_vel_projector%mark(vector_bc_i)
+                call this%bcs_vel%append(vector_bc_i)
              class default
 
                 ! Additionally we mark the special PnPn pressure bc.
-                if (bc_i%bc_type .eq. BC_DIRICHLET) then
+                if (vector_bc_i%bc_type .eq. BC_DIRICHLET) then
                    call this%bc_prs_surface%mark_labeled_zones( &
-                        bc_i%zone_indices)
+                        vector_bc_i%zone_indices)
                    if (this%full_stress_formulation) then
-                      call this%bcs_vel_projector%mark(bc_i)
+                      call this%bcs_vel_projector%mark(vector_bc_i)
                    else
-                      call this%bcs_vel_projector%mark(bc_i, component = 'x')
-                      call this%bcs_vel_projector%mark(bc_i, component = 'y')
-                      call this%bcs_vel_projector%mark(bc_i, component = 'z')
+                      call this%bcs_vel_projector%mark( &
+                           vector_bc_i, component = 'x')
+                      call this%bcs_vel_projector%mark( &
+                           vector_bc_i, component = 'y')
+                      call this%bcs_vel_projector%mark( &
+                           vector_bc_i, component = 'z')
                    end if
                 end if
 
-                call this%bcs_vel%append(bc_i)
+                call this%bcs_vel%append(vector_bc_i)
              end select
           end if
        end do
@@ -1128,17 +1141,18 @@ contains
        do i = 1, n_bcs
           ! Create a new json containing just the subdict for this bc
           call json_extract_item(core, bc_object, i, bc_subdict)
-          bc_i => null()
-          call pressure_bc_factory(bc_i, this, bc_subdict, this%c_Xh, user)
+          scalar_bc_i => null()
+          call pressure_bc_factory(scalar_bc_i, this, bc_subdict, &
+               this%c_Xh, user)
 
           ! Not all bcs require an allocation for pressure in particular,
           ! so we check.
-          if (associated(bc_i)) then
-             call this%bcs_prs%append(bc_i)
+          if (associated(scalar_bc_i)) then
+             call this%bcs_prs%append(scalar_bc_i)
 
              ! Mark strong pressure bcs in the projector to force zero change.
-             if (bc_i%bc_type .eq. BC_DIRICHLET) then
-                call this%bcs_prs_projector%mark(bc_i)
+             if (scalar_bc_i%bc_type .eq. BC_DIRICHLET) then
+                call this%bcs_prs_projector%mark(scalar_bc_i)
              end if
 
           end if
@@ -1177,7 +1191,7 @@ contains
        deallocate(zone_indices)
     end if
 
-    nullify(bc_i, bc_object)
+    nullify(scalar_bc_i, vector_bc_i, bc_object)
 
   end subroutine fluid_pnpn_setup_bcs
 

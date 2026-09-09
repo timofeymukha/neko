@@ -34,6 +34,7 @@
 module expression_dirichlet
   use num_types, only : rp
   use bc, only : bc_t
+  use scalar_bc, only : scalar_bc_t
   use coefs, only : coef_t
   use expression, only : expression_t, expression_check_finite
   use neko_config, only : NEKO_BCKND_DEVICE
@@ -58,7 +59,7 @@ module expression_dirichlet
   !! `finalize`, and from then on the condition costs exactly what a constant
   !! Dirichlet condition costs. A time dependent one is re-evaluated once per
   !! timestep, gated on the `updated` flag of the base type.
-  type, public, extends(bc_t) :: expression_dirichlet_t
+  type, public, extends(scalar_bc_t) :: expression_dirichlet_t
      !> The compiled expression prescribing the boundary value.
      type(expression_t) :: expr
      !> The value in each point of the mask.
@@ -81,14 +82,9 @@ module expression_dirichlet
      procedure, pass(this) :: finalize => expression_dirichlet_finalize
      !> Apply the condition to a scalar field.
      procedure, pass(this) :: apply_scalar => expression_dirichlet_apply_scalar
-     !> (No-op) Apply vector.
-     procedure, pass(this) :: apply_vector => expression_dirichlet_apply_vector
      !> Apply the condition to a scalar field (device).
      procedure, pass(this) :: apply_scalar_dev => &
           expression_dirichlet_apply_scalar_dev
-     !> (No-op) Apply vector (device).
-     procedure, pass(this) :: apply_vector_dev => &
-          expression_dirichlet_apply_vector_dev
      !> Bring `g` up to date with the current time.
      procedure, pass(this) :: update => expression_dirichlet_update
   end type expression_dirichlet_t
@@ -260,23 +256,6 @@ contains
 
   end subroutine expression_dirichlet_apply_scalar
 
-  !> (No-op) Apply vector.
-  !! @param[inout] x The x-component of the field.
-  !! @param[inout] y The y-component of the field.
-  !! @param[inout] z The z-component of the field.
-  !! @param[in] n The size of `x`, `y` and `z`.
-  !! @param[in] time The current time state.
-  !! @param[in] strong Whether the condition is applied strongly.
-  subroutine expression_dirichlet_apply_vector(this, x, y, z, n, time, strong)
-    class(expression_dirichlet_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-  end subroutine expression_dirichlet_apply_vector
-
   !> Apply the condition to a scalar field (device version).
   !! @param[inout] x_d Device pointer to the field.
   !! @param[in] time The current time state.
@@ -306,24 +285,6 @@ contains
     call device_inhom_dirichlet_apply_scalar(this%msk_d, x_d, this%g_d, m, strm)
 
   end subroutine expression_dirichlet_apply_scalar_dev
-
-  !> (No-op) Apply vector (device version).
-  !! @param[inout] x_d Device pointer to the x-component of the field.
-  !! @param[inout] y_d Device pointer to the y-component of the field.
-  !! @param[inout] z_d Device pointer to the z-component of the field.
-  !! @param[in] time The current time state.
-  !! @param[in] strong Whether the condition is applied strongly.
-  !! @param[inout] strm The device stream to issue the work on.
-  subroutine expression_dirichlet_apply_vector_dev(this, x_d, y_d, z_d, &
-       time, strong, strm)
-    class(expression_dirichlet_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-  end subroutine expression_dirichlet_apply_vector_dev
 
   !> Tabulate the coordinates of the points of the mask of a boundary
   !! condition.

@@ -67,6 +67,7 @@ module scalar_pnpn
   use time_state, only : time_state_t
   use utils, only : neko_error
   use bc, only : bc_t, BC_DIRICHLET
+  use scalar_bc, only : scalar_bc_t
   use comm, only : NEKO_COMM
   use mpi_f08, only : MPI_Allreduce, MPI_INTEGER, MPI_MAX
   implicit none
@@ -145,7 +146,7 @@ module scalar_pnpn
      !! @param[inout] json JSON object for initializing the bc.
      !! @param[in] coef SEM coefficients.
      module subroutine bc_factory(object, scheme, json, coef, user)
-       class(bc_t), pointer, intent(inout) :: object
+       class(scalar_bc_t), pointer, intent(inout) :: object
        type(scalar_pnpn_t), intent(in) :: scheme
        type(json_file), intent(inout) :: json
        type(coef_t), target, intent(in) :: coef
@@ -497,7 +498,7 @@ contains
     type(json_core) :: core
     type(json_value), pointer :: bc_object
     type(json_file) :: bc_subdict
-    class(bc_t), pointer :: bc_i
+    class(scalar_bc_t), pointer :: bc_i
     logical :: found
     ! Monitor which boundary zones have been marked
     logical, allocatable :: marked_zones(:)

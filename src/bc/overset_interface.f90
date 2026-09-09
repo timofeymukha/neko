@@ -40,7 +40,8 @@ module overset_interface
   use global_interpolation, only : global_interpolation_t, &
        global_interpolation_settings_t
   use mask, only : mask_t
-  use bc, only : bc_t, BC_DIRICHLET
+  use scalar_bc, only : scalar_bc_t
+  use bc, only : BC_DIRICHLET
   use field_list, only : field_list_t
   use math, only : masked_copy_0, copy
   use device_math, only : device_masked_copy_0, device_copy
@@ -66,7 +67,7 @@ module overset_interface
   private
 
   !> Overset interface BC for a scalar field.
-  type, public, extends(bc_t) :: overset_interface_t
+  type, public, extends(scalar_bc_t) :: overset_interface_t
      !> Underlying scalar field Dirichlet bc.
      type(field_dirichlet_t) :: bc_s
      !> Single-field list for compatibility with field-based update patterns.
@@ -111,11 +112,6 @@ module overset_interface
      procedure, pass(this) :: finalize => overset_interface_finalize
      !> Apply scalar by performing a masked copy.
      procedure, pass(this) :: apply_scalar => overset_interface_apply_scalar
-     !> (No-op) Apply vector.
-     procedure, pass(this) :: apply_vector => overset_interface_apply_vector
-     !> (No-op) Apply vector (device).
-     procedure, pass(this) :: apply_vector_dev => &
-          overset_interface_apply_vector_dev
      !> Apply scalar (device).
      procedure, pass(this) :: apply_scalar_dev => &
           overset_interface_apply_scalar_dev
@@ -342,37 +338,6 @@ contains
     end if
 
   end subroutine overset_interface_apply_scalar_dev
-
-  !> (No-op) Apply vector.
-  subroutine overset_interface_apply_vector(this, x, y, z, n, time, strong)
-    class(overset_interface_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-
-    call neko_error("overset_interface cannot apply vector BCs.&
-    & Use overset_interface_vector instead!")
-
-  end subroutine overset_interface_apply_vector
-
-  !> (No-op) Apply vector (device).
-  subroutine overset_interface_apply_vector_dev(this, x_d, y_d, z_d, time, &
-       strong, strm)
-    class(overset_interface_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-
-    call neko_error("overset_interface cannot apply vector BCs.&
-    & Use overset_interface_vector instead!")
-
-  end subroutine overset_interface_apply_vector_dev
 
   !> Finalize by building the mask arrays and preparing interpolation data.
   subroutine overset_interface_finalize(this)

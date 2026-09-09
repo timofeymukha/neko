@@ -62,7 +62,7 @@ contains
   !! @param[in] coef SEM coefficients.
   !! @param[in] user The user interface.
   module subroutine bc_factory(object, scheme, json, coef, user)
-    class(bc_t), pointer, intent(inout) :: object
+    class(scalar_bc_t), pointer, intent(inout) :: object
     type(scalar_pnpn_t), intent(in) :: scheme
     type(json_file), intent(inout) :: json
     type(coef_t), target, intent(in) :: coef

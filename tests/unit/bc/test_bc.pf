@@ -8,6 +8,7 @@ module test_bc
   use coefs, only : coef_t
   use gather_scatter, only : gs_t
   use dirichlet, only : dirichlet_t
+  use no_slip, only : no_slip_t
   use facet_zone, only : facet_zone_t
   use stack, only : stack_i4t2_t
   use tuple, only : tuple_i4_t
@@ -407,19 +408,19 @@ contains
     deallocate(x)
   end subroutine test_bc_apply_scalar_weak_noop
 
-  !> Apply a vector Dirichlet condition and verify marked entries in x, y,
-  !! and z are all set to g, with at least one unmasked entry unchanged.
+  !> Apply a vector condition and verify marked entries in x, y and z are all
+  !! constrained, with at least one unmasked entry unchanged.
   @test(npes=[1])
   subroutine test_bc_apply_vector(this)
     class(bc_test_case), intent(inout) :: this
-    type(dirichlet_t) :: bc
+    type(no_slip_t) :: bc
     real(kind=rp), allocatable :: x(:), y(:), z(:)
     integer :: n, i
 
-    ! The vector path is separate from apply_scalar, so this test exercises
-    ! the bc_t vector interface through the concrete dirichlet_t
-    ! implementation.
-    call bc%init_from_components(this%coef, 2.75_rp)
+    ! The vector path lives on vector_bc_t, a separate branch of the hierarchy
+    ! from the scalar path, so this test exercises it through the concrete
+    ! no_slip_t implementation, which zeroes all three components.
+    call bc%init_from_components(this%coef)
     call bc%mark_facet(2, 1)
     call bc%finalize()
 
@@ -432,9 +433,9 @@ contains
     call bc%apply_vector(x, y, z, n)
 
     do i = 1, bc%msk(0)
-       @assertEqual(2.75_rp, x(bc%msk(i)))
-       @assertEqual(2.75_rp, y(bc%msk(i)))
-       @assertEqual(2.75_rp, z(bc%msk(i)))
+       @assertEqual(0.0_rp, x(bc%msk(i)))
+       @assertEqual(0.0_rp, y(bc%msk(i)))
+       @assertEqual(0.0_rp, z(bc%msk(i)))
     end do
 
     @assertTrue(has_unmasked_value(x, bc%msk, -1.0_rp))
@@ -449,14 +450,14 @@ contains
   @test(npes=[1])
   subroutine test_bc_apply_vector_weak_noop(this)
     class(bc_test_case), intent(inout) :: this
-    type(dirichlet_t) :: bc
+    type(no_slip_t) :: bc
     real(kind=rp), allocatable :: x(:), y(:), z(:)
     integer :: n
 
     ! This is the vector counterpart of the scalar weak no-op test. It checks
     ! that the optional strong flag is honored consistently across all vector
     ! components.
-    call bc%init_from_components(this%coef, 2.75_rp)
+    call bc%init_from_components(this%coef)
     call bc%mark_facet(2, 1)
     call bc%finalize()
 

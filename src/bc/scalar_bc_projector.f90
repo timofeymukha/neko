@@ -149,11 +149,14 @@ contains
   end subroutine scalar_bc_projector_mark_bc
 
   !> Add the constrained dofs from all boundary conditions in a list.
-  !! @param[in] bclst List of scalar boundary conditions to merge into the
-  !! projector mask.
+  !! @details Only the masks are read, so this accepts either a scalar or a
+  !! vector list. The segregated vector projector uses it to merge the masks
+  !! of one Cartesian component.
+  !! @param[in] bclst List of boundary conditions to merge into the projector
+  !! mask.
   subroutine scalar_bc_projector_mark_bc_list(this, bclst)
     class(scalar_bc_projector_t), intent(inout) :: this
-    type(bc_list_t), intent(in) :: bclst
+    class(bc_list_t), intent(in) :: bclst
     integer :: i
 
     do i = 1, bclst%size()

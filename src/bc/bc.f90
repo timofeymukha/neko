@@ -35,7 +35,7 @@ module bc
   use neko_config, only : NEKO_BCKND_DEVICE
   use num_types, only : rp
   use device, only : HOST_TO_DEVICE, device_memcpy, &
-       device_unmap, device_map, DEVICE_TO_HOST, glb_cmd_queue
+       device_unmap, device_map, DEVICE_TO_HOST
   use iso_c_binding, only : c_associated
   use dofmap, only : dofmap_t
   use coefs, only : coef_t
@@ -49,12 +49,10 @@ module bc
   use gs_ops, only : GS_OP_ADD
   use math, only : relcmp, rzero
   use device_math, only : device_cfill
-  use utils, only : neko_error, neko_warning, linear_index, split_string
+  use utils, only : neko_warning, linear_index
   use logger, only : neko_log, LOG_SIZE
   use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR
   use json_module, only : json_file
-  use time_state, only : time_state_t
-  use field, only : field_t
   use file, only : file_t
 
   implicit none
@@ -68,7 +66,16 @@ module bc
   integer, parameter, public :: BC_MIXED_CONSTRAINS_TANGENT = 3
   integer, parameter, public :: BC_NEUMANN = 5
 
-  !> Base type for a boundary condition
+  !> Base type for a boundary condition.
+  !! @details This type carries everything a boundary condition needs to know
+  !! about *where* it acts: the marked facets, the dof masks derived from them,
+  !! the name and zone indices, and the `bc_type` used for global resolution.
+  !! It deliberately says nothing about *what* a condition does to a field.
+  !!
+  !! Conditions that constrain a field extend `scalar_bc_t` or `vector_bc_t`,
+  !! which add the corresponding apply interface. Conditions that only need a
+  !! boundary mask, such as `facet_normal_t` or the mask holders used by the
+  !! simulation components, extend this type directly.
   type, public, abstract :: bc_t
      !> The linear index of each constrained local degree of freedom
      integer, allocatable :: msk(:)
@@ -120,22 +127,8 @@ module bc
      !! arrays
      procedure, pass(this) :: finalize_base => bc_finalize_base
 
-     !> Apply the boundary condition to a scalar field. Dispatches to the CPU
-     !! or the device version.
-     procedure, pass(this) :: apply_scalar_generic => bc_apply_scalar_generic
-     !> Apply the boundary condition to a vector field. Dispatches to the CPU
-     !! or the device version.
-     procedure, pass(this) :: apply_vector_generic => bc_apply_vector_generic
      !> Write a field showing the mask of the bcs
      procedure, pass(this) :: debug_mask_ => bc_debug_mask
-     !> Apply the boundary condition to a scalar field on the CPU.
-     procedure(bc_apply_scalar), pass(this), deferred :: apply_scalar
-     !> Apply the boundary condition to a vector field on the CPU.
-     procedure(bc_apply_vector), pass(this), deferred :: apply_vector
-     !> Device version of \ref apply_scalar on the device.
-     procedure(bc_apply_scalar_dev), pass(this), deferred :: apply_scalar_dev
-     !> Device version of \ref apply_vector on the device.
-     procedure(bc_apply_vector_dev), pass(this), deferred :: apply_vector_dev
      !> Deferred destructor.
      procedure(bc_destructor), pass(this), deferred :: free
      !> Deferred constructor.
@@ -148,12 +141,6 @@ module bc
   type, public :: bc_ptr_t
      class(bc_t), pointer :: ptr => null()
   end type bc_ptr_t
-
-  ! Helper type to have an array of polymorphic bc_t objects.
-  type, public :: bc_alloc_t
-     class(bc_t), allocatable :: obj
-  end type bc_alloc_t
-
 
   abstract interface
      !> Constructor
@@ -179,84 +166,6 @@ module bc
        import :: bc_t
        class(bc_t), intent(inout), target :: this
      end subroutine bc_finalize
-  end interface
-
-  abstract interface
-     !> Apply the boundary condition to a scalar field
-     !! @param x The field for which to apply the boundary condition.
-     !! @param n The size of x.
-     !! @param time Current time state.
-     !! @param strong Whether we are setting a strong or a weak bc.
-     subroutine bc_apply_scalar(this, x, n, time, strong)
-       import :: bc_t, time_state_t
-       import :: rp
-       class(bc_t), intent(inout) :: this
-       integer, intent(in) :: n
-       real(kind=rp), intent(inout), dimension(n) :: x
-       type(time_state_t), intent(in), optional :: time
-       logical, intent(in), optional :: strong
-     end subroutine bc_apply_scalar
-  end interface
-
-  abstract interface
-     !> Apply the boundary condition to a vector field
-     !! @param x The x comp of the field for which to apply the bc.
-     !! @param y The y comp of the field for which to apply the bc.
-     !! @param z The z comp of the field for which to apply the bc.
-     !! @param n The size of x, y, and z.
-     !! @param t Current time.
-     !! @param tstep Current time-step.
-     !! @param strong Whether we are setting a strong or a weak bc.
-     subroutine bc_apply_vector(this, x, y, z, n, time, strong)
-       import :: bc_t, time_state_t
-       import :: rp
-       class(bc_t), intent(inout) :: this
-       integer, intent(in) :: n
-       real(kind=rp), intent(inout), dimension(n) :: x
-       real(kind=rp), intent(inout), dimension(n) :: y
-       real(kind=rp), intent(inout), dimension(n) :: z
-       type(time_state_t), intent(in), optional :: time
-       logical, intent(in), optional :: strong
-     end subroutine bc_apply_vector
-  end interface
-
-  abstract interface
-     !> Apply the boundary condition to a scalar field on the device
-     !! @param x_d Device pointer to the field.
-     !! @param time The time state.
-     !! @param strong Whether we are setting a strong or a weak bc.
-     !! @param strm Device stream
-     subroutine bc_apply_scalar_dev(this, x_d, time, strong, strm)
-       import :: c_ptr
-       import :: bc_t, time_state_t
-       import :: rp
-       class(bc_t), intent(inout), target :: this
-       type(c_ptr), intent(inout) :: x_d
-       type(time_state_t), intent(in), optional :: time
-       logical, intent(in), optional :: strong
-       type(c_ptr), intent(inout) :: strm
-     end subroutine bc_apply_scalar_dev
-  end interface
-
-  abstract interface
-     !> Apply the boundary condition to a vector field on the device.
-     !! @param x_d Device pointer to the values to be applied for the x comp.
-     !! @param y_d Device pointer to the values to be applied for the y comp.
-     !! @param z_d Device pointer to the values to be applied for the z comp.
-     !! @param time The time state.
-     !! @param strong Whether we are setting a strong or a weak bc.
-     !! @param strm Device stream
-     subroutine bc_apply_vector_dev(this, x_d, y_d, z_d, time, strong, strm)
-       import :: c_ptr, bc_t, time_state_t
-       import :: rp
-       class(bc_t), intent(inout), target :: this
-       type(c_ptr), intent(inout) :: x_d
-       type(c_ptr), intent(inout) :: y_d
-       type(c_ptr), intent(inout) :: z_d
-       type(time_state_t), intent(in), optional :: time
-       logical, intent(in), optional :: strong
-       type(c_ptr), intent(inout) :: strm
-     end subroutine bc_apply_vector_dev
   end interface
 
 contains
@@ -324,86 +233,6 @@ contains
     this%updated = .false.
 
   end subroutine bc_free_base
-
-  !> Apply the boundary condition to a vector field. Dispatches to the CPU
-  !! or the device version.
-  !! @param x The x comp of the field for which to apply the bc.
-  !! @param y The y comp of the field for which to apply the bc.
-  !! @param z The z comp of the field for which to apply the bc.
-  !! @param time Current time state.
-  !! @param strong Whether we are setting a strong or a weak bc.
-  !! @param Device stream
-  subroutine bc_apply_vector_generic(this, x, y, z, time, strong, strm)
-    class(bc_t), intent(inout) :: this
-    type(field_t), intent(inout) :: x
-    type(field_t), intent(inout) :: y
-    type(field_t), intent(inout) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout), optional :: strm
-    type(c_ptr) :: strm_
-    integer :: n
-    character(len=256) :: msg
-
-    ! Get the size of the fields
-    n = x%size()
-
-    ! Ensure all fields are the same size
-    if (y%size() .ne. n .or. z%size() .ne. n) then
-       msg = "Fields x, y, z must have the same size in " // &
-            "bc_list_apply_vector_field"
-       call neko_error(trim(msg))
-    end if
-
-    if (NEKO_BCKND_DEVICE .eq. 1) then
-
-       if (present(strm)) then
-          strm_ = strm
-       else
-          strm_ = glb_cmd_queue
-       end if
-
-       call this%apply_vector_dev(x%x_d, y%x_d, z%x_d, time = time, &
-            strong = strong, strm = strm_)
-    else
-       call this%apply_vector(x%x, y%x, z%x, n, time = time, strong = strong)
-    end if
-
-  end subroutine bc_apply_vector_generic
-
-  !> Apply the boundary condition to a scalar field. Dispatches to the CPU
-  !! or the device version.
-  !! @param x The x comp of the field for which to apply the bc.
-  !! @param time Current time state.
-  !! @param strong Whether we are setting a strong or a weak bc.
-  !! @param strm Device stream
-  subroutine bc_apply_scalar_generic(this, x, time, strong, strm)
-    class(bc_t), intent(inout) :: this
-    type(field_t), intent(inout) :: x
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout), optional :: strm
-    type(c_ptr) :: strm_
-    integer :: n
-
-    ! Get the size of the field
-    n = x%size()
-
-    if (NEKO_BCKND_DEVICE .eq. 1) then
-
-       if (present(strm)) then
-          strm_ = strm
-       else
-          strm_ = glb_cmd_queue
-       end if
-
-       call this%apply_scalar_dev(x%x_d, time = time, strong = strong, &
-            strm = strm_)
-    else
-       call this%apply_scalar(x%x, n, time = time)
-    end if
-
-  end subroutine bc_apply_scalar_generic
 
   !> Mark @a facet on element @a el as part of the boundary condition
   !! @param facet The index of the facet.

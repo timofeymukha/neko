@@ -32,10 +32,10 @@
 !
 !> Defines a zero-valued Dirichlet boundary condition.
 module zero_dirichlet
-  use device_zero_dirichlet, only : device_zero_dirichlet_apply_scalar, &
-       device_zero_dirichlet_apply_vector
+  use device_zero_dirichlet, only : device_zero_dirichlet_apply_scalar
   use num_types, only : rp
-  use bc, only : bc_t, BC_DIRICHLET
+  use scalar_bc, only : scalar_bc_t
+  use bc, only : BC_DIRICHLET
   use, intrinsic :: iso_c_binding, only : c_ptr
   use coefs, only : coef_t
   use json_module, only : json_file
@@ -44,16 +44,14 @@ module zero_dirichlet
   private
 
   !> Zero-valued Dirichlet boundary condition.
-  !! Used for no-slip walls, but also for various auxillary conditions,
-  !! such as for residuals.
-  type, public, extends(bc_t) :: zero_dirichlet_t
+  !! @details Used for outflow pressure and for various auxillary conditions,
+  !! such as for residuals. The no-slip wall is `no_slip_t`, which constrains
+  !! all three velocity components.
+  type, public, extends(scalar_bc_t) :: zero_dirichlet_t
    contains
      procedure, pass(this) :: apply_scalar => zero_dirichlet_apply_scalar
-     procedure, pass(this) :: apply_vector => zero_dirichlet_apply_vector
      procedure, pass(this) :: apply_scalar_dev => &
           zero_dirichlet_apply_scalar_dev
-     procedure, pass(this) :: apply_vector_dev => &
-          zero_dirichlet_apply_vector_dev
      !> Constructor.
      procedure, pass(this) :: init => zero_dirichlet_init
      !> Constructor from components.
@@ -118,38 +116,6 @@ contains
 
   end subroutine zero_dirichlet_apply_scalar
 
-  !> Apply boundary condition to a vector field.
-  subroutine zero_dirichlet_apply_vector(this, x, y, z, n, time, strong)
-    class(zero_dirichlet_t), intent(inout) :: this
-    integer, intent(in) :: n
-    real(kind=rp), intent(inout), dimension(n) :: x
-    real(kind=rp), intent(inout), dimension(n) :: y
-    real(kind=rp), intent(inout), dimension(n) :: z
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    integer :: i, m, k
-    logical :: strong_
-
-    if (present(strong)) then
-       strong_ = strong
-    else
-       strong_ = .true.
-    end if
-
-    if (strong_) then
-       m = this%msk(0)
-       !$omp do
-       do i = 1, m
-          k = this%msk(i)
-          x(k) = 0d0
-          y(k) = 0d0
-          z(k) = 0d0
-       end do
-       !$omp end do
-    end if
-
-  end subroutine zero_dirichlet_apply_vector
-
   !> Apply boundary condition to a scalar field, device version.
   subroutine zero_dirichlet_apply_scalar_dev(this, x_d, time, strong, strm)
     class(zero_dirichlet_t), intent(inout), target :: this
@@ -171,31 +137,6 @@ contains
     end if
 
   end subroutine zero_dirichlet_apply_scalar_dev
-
-  !> Apply boundary condition to a vector field, device version.
-  subroutine zero_dirichlet_apply_vector_dev(this, x_d, y_d, z_d, time, &
-       strong, strm)
-    class(zero_dirichlet_t), intent(inout), target :: this
-    type(c_ptr), intent(inout) :: x_d
-    type(c_ptr), intent(inout) :: y_d
-    type(c_ptr), intent(inout) :: z_d
-    type(time_state_t), intent(in), optional :: time
-    logical, intent(in), optional :: strong
-    type(c_ptr), intent(inout) :: strm
-    logical :: strong_
-
-    if (present(strong)) then
-       strong_ = strong
-    else
-       strong_ = .true.
-    end if
-
-    if (strong_ .and. (this%msk(0) .gt. 0)) then
-       call device_zero_dirichlet_apply_vector(this%msk_d, x_d, y_d, z_d, &
-            size(this%msk), strm)
-    end if
-
-  end subroutine zero_dirichlet_apply_vector_dev
 
   !> Destructor
   subroutine zero_dirichlet_free(this)

@@ -149,7 +149,7 @@ contains
   subroutine hsmg_init(this, coef, bclst, hsmg_params)
     class(hsmg_t), intent(inout), target :: this
     type(coef_t), intent(in), target :: coef
-    type(bc_list_t), intent(inout), target :: bclst
+    class(bc_list_t), intent(inout), target :: bclst
     type(json_file), intent(inout) :: hsmg_params
     character(len=:), allocatable :: crs_solver, crs_pc
     logical :: crs_monitor
@@ -194,7 +194,7 @@ contains
        crs_monitor, crs_tamg_lvls, crs_tamg_itrs, crs_tamg_cheby_degree)
     class(hsmg_t), intent(inout), target :: this
     type(coef_t), intent(in), target :: coef
-    type(bc_list_t), intent(inout), target :: bclst
+    class(bc_list_t), intent(inout), target :: bclst
     character(len=:), intent(inout), allocatable :: crs_solver, crs_pc
     logical, intent(inout) :: crs_monitor
     integer, intent(in) :: crs_tamg_lvls, crs_tamg_itrs, crs_tamg_cheby_degree
