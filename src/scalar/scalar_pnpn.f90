@@ -1,4 +1,4 @@
-! Copyright (c) 2022-2024, The Neko Authors
+! Copyright (c) 2022-2026, The Neko Authors
 ! All rights reserved.
 !
 ! Redistribution and use in source and binary forms, with or without
@@ -34,7 +34,6 @@
 
 module scalar_pnpn
   use num_types, only : rp
-  use, intrinsic :: iso_fortran_env, only : error_unit
   use rhs_maker, only : rhs_maker_bdf_t, rhs_maker_ext_t, rhs_maker_oifs_t, &
        rhs_maker_ext_fctry, rhs_maker_bdf_fctry, rhs_maker_oifs_fctry
   use scalar_scheme, only : scalar_scheme_t
@@ -48,6 +47,7 @@ module scalar_pnpn
   use gather_scatter, only : gs_t, GS_OP_ADD, GS_OP_MIN, GS_OP_MAX
   use scalar_residual, only : scalar_residual_t, scalar_residual_factory
   use ax_product, only : ax_t, ax_helm_allocator
+  use ax_helm_svv, only : ax_helm_svv_t
   use field_series, only : field_series_t
   use facet_normal, only : facet_normal_t
   use krylov, only : ksp_monitor_t
@@ -66,6 +66,7 @@ module scalar_pnpn
   use neko_config, only : NEKO_BCKND_DEVICE
   use time_step_controller, only : time_step_controller_t
   use time_state, only : time_state_t
+  use utils, only : neko_error
   use bc, only : bc_t, BC_DIRICHLET
   use comm, only : NEKO_COMM
   use mpi_f08, only : MPI_Allreduce, MPI_INTEGER, MPI_MAX
@@ -191,7 +192,15 @@ contains
     call this%scheme_init(msh, coef, gs, params, scheme, user, rho)
 
     ! Setup backend dependent Ax routines
-    call ax_helm_allocator(this%ax, type_name = "standard")
+    if (this%svv_enabled) then
+       call ax_helm_allocator(this%ax, type_name = "standard_svv")
+       select type (operator => this%ax)
+       class is (ax_helm_svv_t)
+          operator%svv => this%svv
+       end select
+    else
+       call ax_helm_allocator(this%ax, type_name = "standard")
+    end if
 
     ! Setup backend dependent scalar residual routines
     call scalar_residual_factory(this%res)
@@ -308,6 +317,12 @@ contains
   subroutine scalar_pnpn_free(this)
     class(scalar_pnpn_t), intent(inout) :: this
 
+    ! Release operator references before scheme_free deallocates their targets.
+    if (allocated(this%Ax)) then
+       call this%Ax%free()
+       deallocate(this%Ax)
+    end if
+
     !Deallocate scalar field
     call this%scheme_free()
 
@@ -331,10 +346,6 @@ contains
     nullify(this%ulag)
     nullify(this%vlag)
     nullify(this%wlag)
-
-    if (allocated(this%Ax)) then
-       deallocate(this%Ax)
-    end if
 
     if (allocated(this%res)) then
        deallocate(this%res)
@@ -390,6 +401,11 @@ contains
       ! Update material properties and their pointwise product.
       call this%update_material_properties(time)
       call field_col3(rho_cp, rho, cp, n)
+
+      ! Update the SVV coefficient if SVV is enabled.
+      if (this%svv_enabled) then
+         call this%svv%update(rho_cp, tstep)
+      end if
 
       ! Compute the source terms
       call this%source_term%compute(time)
@@ -502,6 +518,7 @@ contains
     ! Monitor which boundary zones have been marked
     logical, allocatable :: marked_zones(:)
     integer, allocatable :: zone_indices(:)
+    character(len=256) :: error_msg
 
     if (this%params%valid_path('boundary_conditions')) then
        call this%params%info('boundary_conditions', &
@@ -529,21 +546,23 @@ contains
                   MPI_INTEGER, MPI_MAX, NEKO_COMM, ierr)
 
              if (global_zone_size .eq. 0) then
-                write(error_unit, '(A, A, I0, A, A, I0, A)') &
-                     "*** ERROR ***: ", "Zone index ", zone_indices(j), &
+                write(error_msg, '(A, I0, A, A, I0, A)') &
+                     "Zone index ", zone_indices(j), &
                      " is invalid as this zone has 0 size, meaning it ", &
                      "does not exist in the mesh. Check scalar boundary ", &
                      "condition ", i, "."
+                call neko_error(error_msg)
                 error stop
              end if
 
              if (marked_zones(zone_indices(j))) then
-                write(error_unit, '(A, A, I0, A, A, A, A)') "*** ERROR ***: ", &
+                write(error_msg, '(A, I0, A, A, A, A)')&
                      "Zone with index ", zone_indices(j), &
                      " has already been assigned a boundary condition. ", &
                      "Please check your boundary_conditions entry for the ", &
                      "scalar and make sure that each zone index appears only ",&
                      "in a single boundary condition."
+                call neko_error(error_msg)
                 error stop
              else
                 marked_zones(zone_indices(j)) = .true.
@@ -560,8 +579,9 @@ contains
        do i = 1, size(this%msh%labeled_zones)
           if ((this%msh%labeled_zones(i)%size .gt. 0) .and. &
                (.not. marked_zones(i))) then
-             write(error_unit, '(A, A, I0)') "*** ERROR ***: ", &
+             write(error_msg, '(A, I0)') &
                   "No scalar boundary condition assigned to zone ", i
+             call neko_error(error_msg)
              error stop
           end if
        end do
@@ -569,9 +589,10 @@ contains
        ! Check that there are no labeled zones, i.e. all are periodic.
        do i = 1, size(this%msh%labeled_zones)
           if (this%msh%labeled_zones(i)%size .gt. 0) then
-             write(error_unit, '(A, A, A)') "*** ERROR ***: ", &
+             write(error_msg, '(A, A)') &
                   "No boundary_conditions entry in the case file for scalar ", &
                   this%s%name
+             call neko_error(error_msg)
              error stop
           end if
        end do
