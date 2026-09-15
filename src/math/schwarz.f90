@@ -246,6 +246,13 @@ contains
       !   Cred to PFF for this, very clever
       call schwarz_extrude(work1, 0, zero, work2, 0, one, enx, eny, enz, &
            msh%nelv)
+      ! F7: children's local solutions vanish on their hanging faces and halo
+      ! (Dirichlet), so they contribute no overlap to the parent: exclude them
+      ! from the counts on both the sent (work2) and own (work1) side.
+      if (allocated(this%gs_schwarz%interp)) then
+         call schwarz_zero_children_ext(this, work1, ns)
+         call schwarz_zero_children_ext(this, work2, ns)
+      end if
 
       if (NEKO_BCKND_DEVICE .eq. 1) then
          call device_memcpy(work2, this%work2_d, ns, &
@@ -533,10 +540,11 @@ contains
   !! where a hanging child receives J(parent) and the parent receives
   !! sum_c J^-1(child_c). op_inv = J gs J^-1 is exact for all slots except the
   !! hanging children, which are recomputed from the non-child contributions.
-  subroutine schwarz_halo_exchange_nc(this, work, ns)
+  subroutine schwarz_halo_exchange_nc(this, work, ns, cscale_f, cscale_e)
     class(schwarz_t), intent(inout) :: this
     integer, intent(in) :: ns
     real(kind=rp), intent(inout), target :: work(ns)
+    real(kind=rp), intent(in), optional :: cscale_f, cscale_e
     real(kind=rp), allocatable, target :: t1(:), t2(:)
     real(kind=rp), pointer :: w4(:,:,:,:), t14(:,:,:,:), t24(:,:,:,:)
     integer :: enx, eny, enz, nel, i
@@ -552,7 +560,11 @@ contains
     t14(1:enx, 1:eny, 1:enz, 1:nel) => t1
     t24(1:enx, 1:eny, 1:enz, 1:nel) => t2
 
-    ! t1 = J gs J^-1 work : exact on non-child slots
+    ! t1 = J gs J^-1 work : exact on non-child slots; optionally rescale the
+    ! children's contribution (dual quantities) before sampling
+    if (present(cscale_f) .and. present(cscale_e)) then
+       call this%gs_schwarz%interp%scale_children(t14, cscale_f, cscale_e)
+    end if
     call this%gs_schwarz%op_inv(t1, ns, GS_OP_ADD)
 
     ! t2 = J gs (Z work) : children receive J(sum of non-child contributions)
@@ -575,6 +587,21 @@ contains
     end do
     deallocate(t1, t2)
   end subroutine schwarz_halo_exchange_nc
+
+  !> Zero the hanging children's faces/edges of an extended (Schwarz) array
+  subroutine schwarz_zero_children_ext(this, work, ns)
+    class(schwarz_t), intent(inout) :: this
+    integer, intent(in) :: ns
+    real(kind=rp), intent(inout), target :: work(ns)
+    real(kind=rp), pointer :: w4(:,:,:,:)
+    integer :: enx, eny, enz
+
+    enx = this%Xh_schwarz%lx
+    eny = this%Xh_schwarz%ly
+    enz = this%Xh_schwarz%lz
+    w4(1:enx, 1:eny, 1:enz, 1:this%msh%nelv) => work
+    call this%gs_schwarz%interp%zero_children(w4)
+  end subroutine schwarz_zero_children_ext
 
   !> Sum a regular-size array over the non-child incidences of each node:
   !! hanging children's faces/edges are zeroed and a plain gather-scatter
@@ -659,8 +686,10 @@ contains
               enx, eny, enz, this%msh%nelv)
 
          if (allocated(this%gs_schwarz%interp)) then
-            ! F5-B: exact halo exchange at hanging faces
-            call schwarz_halo_exchange_nc(this, work1, ns)
+            ! F5-B: exact halo exchange at hanging faces; F7: the children's
+            ! residual is a child-mass-scaled dual quantity, rescale it by the
+            ! face/edge measure ratio (4/2) before sampling it for the parent
+            call schwarz_halo_exchange_nc(this, work1, ns, 4.0_rp, 2.0_rp)
          else
             call this%gs_schwarz%op(work1, ns, GS_OP_ADD)
          end if

@@ -402,6 +402,19 @@ contains
          rbs = this%dof%msh%facet_type(4, ie)
          lbt = this%dof%msh%facet_type(5, ie)
          rbt = this%dof%msh%facet_type(6, ie)
+         ! F7: hanging (child) faces are treated as Dirichlet in the local
+         ! Schwarz problem; the interface dofs belong to the parent and are
+         ! smoothed from the parent side only.
+         if (this%dof%msh%conn%ifhang_set) then
+            if (this%dof%msh%conn%hang(ie)) then
+               if (this%dof%msh%conn%fcs%hang(1, ie) .ne. -1) lbr = 1
+               if (this%dof%msh%conn%fcs%hang(2, ie) .ne. -1) rbr = 1
+               if (this%dof%msh%conn%fcs%hang(3, ie) .ne. -1) lbs = 1
+               if (this%dof%msh%conn%fcs%hang(4, ie) .ne. -1) rbs = 1
+               if (this%dof%msh%conn%fcs%hang(5, ie) .ne. -1) lbt = 1
+               if (this%dof%msh%conn%fcs%hang(6, ie) .ne. -1) rbt = 1
+            end if
+         end if
 
          nr = nl
          ns = nl
