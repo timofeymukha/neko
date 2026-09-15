@@ -615,28 +615,54 @@ contains
   !> F10: optional switch (env NEKO_HANG_NOXFER=1): children receive no overlap
   !! contribution from the parent across hanging faces
   !> F10: factor beta applied to the parent's overlap contribution received by
-  !! hanging children (env NEKO_HANG_XFER_BETA; default 0 = no transfer, 1 = full)
+  !! hanging children (env NEKO_HANG_XFER_BETA; default 1 = full, 0 = none)
   real(kind=rp) function schwarz_xfer_beta()
     character(len=32) :: buf
     integer :: stat, l
-    schwarz_xfer_beta = 0.0_rp
+    schwarz_xfer_beta = 1.0_rp
     call get_environment_variable('NEKO_HANG_XFER_BETA', buf, l, stat)
     if (stat .eq. 0 .and. l .gt. 0) read(buf, *) schwarz_xfer_beta
   end function schwarz_xfer_beta
 
-  !> F10: scale the hanging children's halo planes of an extended array by beta
+  !> F11: scale the hanging children's halo planes of an extended array.
+  !! Nearly isotropic children (aspect ratio <= NEKO_HANG_AR_THR, default 2)
+  !! receive beta x the parent's overlap; stretched children receive none.
   subroutine schwarz_scale_children_ext(this, work, ns, beta)
     class(schwarz_t), intent(inout) :: this
     integer, intent(in) :: ns
     real(kind=rp), intent(inout), target :: work(ns)
     real(kind=rp), intent(in) :: beta
     real(kind=rp), pointer :: w4(:,:,:,:)
-    integer :: enx, eny, enz
+    real(kind=rp) :: ar, thr, fac, lmin, lmax
+    character(len=32) :: buf
+    integer :: enx, eny, enz, e, f, stat, l
     enx = this%Xh_schwarz%lx
     eny = this%Xh_schwarz%ly
     enz = this%Xh_schwarz%lz
+    thr = 2.0_rp
+    call get_environment_variable('NEKO_HANG_AR_THR', buf, l, stat)
+    if (stat .eq. 0 .and. l .gt. 0) read(buf, *) thr
     w4(1:enx, 1:eny, 1:enz, 1:this%msh%nelv) => work
-    call this%gs_schwarz%interp%scale_children(w4, beta, beta)
+    if (.not. this%msh%conn%ifhang_set) return
+    do e = 1, this%msh%nelv
+       if (.not. this%msh%conn%hang(e)) cycle
+       lmin = min(this%fdm%len_mr(e), this%fdm%len_ms(e), this%fdm%len_mt(e))
+       lmax = max(this%fdm%len_mr(e), this%fdm%len_ms(e), this%fdm%len_mt(e))
+       ar = lmax / max(lmin, 1e-30_rp)
+       fac = 0.0_rp
+       if (ar .le. thr) fac = beta
+       do f = 1, 6
+          if (this%msh%conn%fcs%hang(f, e) .eq. -1) cycle
+          select case (f)
+          case (1); w4(1, :, :, e) = fac * w4(1, :, :, e)
+          case (2); w4(enx, :, :, e) = fac * w4(enx, :, :, e)
+          case (3); w4(:, 1, :, e) = fac * w4(:, 1, :, e)
+          case (4); w4(:, eny, :, e) = fac * w4(:, eny, :, e)
+          case (5); w4(:, :, 1, e) = fac * w4(:, :, 1, e)
+          case (6); w4(:, :, enz, e) = fac * w4(:, :, enz, e)
+          end select
+       end do
+    end do
   end subroutine schwarz_scale_children_ext
 
   !> F9: divide the border counts on parent faces (planes 1 and 2 from that
