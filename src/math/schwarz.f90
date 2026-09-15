@@ -252,6 +252,9 @@ contains
       if (allocated(this%gs_schwarz%interp)) then
          call schwarz_zero_children_ext(this, work1, ns)
          call schwarz_zero_children_ext(this, work2, ns)
+         ! F8: parents' local solutions also vanish on parent faces/halo
+         call schwarz_zero_parent_halo(this, work1, ns)
+         call schwarz_zero_parent_halo(this, work2, ns)
       end if
 
       if (NEKO_BCKND_DEVICE .eq. 1) then
@@ -602,6 +605,35 @@ contains
     w4(1:enx, 1:eny, 1:enz, 1:this%msh%nelv) => work
     call this%gs_schwarz%interp%zero_children(w4)
   end subroutine schwarz_zero_children_ext
+
+  !> F8: zero the halo planes of parent faces (faces of non-child elements
+  !! adjacent to hanging children) in an extended (Schwarz) array
+  subroutine schwarz_zero_parent_halo(this, work, ns)
+    class(schwarz_t), intent(inout) :: this
+    integer, intent(in) :: ns
+    real(kind=rp), intent(inout), target :: work(ns)
+    real(kind=rp), pointer :: w4(:,:,:,:)
+    integer :: enx, eny, enz, e, f
+
+    if (.not. allocated(this%fdm%pface)) return
+    enx = this%Xh_schwarz%lx
+    eny = this%Xh_schwarz%ly
+    enz = this%Xh_schwarz%lz
+    w4(1:enx, 1:eny, 1:enz, 1:this%msh%nelv) => work
+    do e = 1, this%msh%nelv
+       do f = 1, 6
+          if (.not. this%fdm%pface(f, e)) cycle
+          select case (f)
+          case (1); w4(1, :, :, e) = 0.0_rp
+          case (2); w4(enx, :, :, e) = 0.0_rp
+          case (3); w4(:, 1, :, e) = 0.0_rp
+          case (4); w4(:, eny, :, e) = 0.0_rp
+          case (5); w4(:, :, 1, e) = 0.0_rp
+          case (6); w4(:, :, enz, e) = 0.0_rp
+          end select
+       end do
+    end do
+  end subroutine schwarz_zero_parent_halo
 
   !> Sum a regular-size array over the non-child incidences of each node:
   !! hanging children's faces/edges are zeroed and a plain gather-scatter
