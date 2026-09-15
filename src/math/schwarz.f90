@@ -60,7 +60,7 @@
 !> Overlapping schwarz solves
 module schwarz
   use num_types, only : rp, i8
-  use math, only : rzero, rone
+  use math, only : rzero, rone, copy
   use mesh, only : mesh_t
   use space, only : space_t, GLL
   use dofmap, only : dofmap_t
@@ -255,9 +255,9 @@ contains
               DEVICE_TO_HOST, sync = .true.)
       else
          ! F5: count halo contributions with the same operator used in
-         ! schwarz_compute (op_inv on nonconforming meshes)
+         ! schwarz_compute (exact nonconforming exchange)
          if (allocated(this%gs_schwarz%interp)) then
-            call this%gs_schwarz%op_inv(work2, ns, GS_OP_ADD)
+            call schwarz_halo_exchange_nc(this, work2, ns)
          else
             call this%gs_schwarz%op(work2, ns, GS_OP_ADD)
          end if
@@ -525,6 +525,55 @@ contains
     end if
   end subroutine schwarz_extrude_single
 
+  !> Halo exchange on the extended (Schwarz) array for nonconforming meshes.
+  !! On entry the halo planes hold the element's own values (as set by
+  !! schwarz_extrude); on exit they hold own + sum of the neighbours' values,
+  !! where a hanging child receives J(parent) and the parent receives
+  !! sum_c J^-1(child_c). op_inv = J gs J^-1 is exact for all slots except the
+  !! hanging children, which are recomputed from the non-child contributions.
+  subroutine schwarz_halo_exchange_nc(this, work, ns)
+    class(schwarz_t), intent(inout) :: this
+    integer, intent(in) :: ns
+    real(kind=rp), intent(inout), target :: work(ns)
+    real(kind=rp), allocatable, target :: t1(:), t2(:)
+    real(kind=rp), pointer :: w4(:,:,:,:), t14(:,:,:,:), t24(:,:,:,:)
+    integer :: enx, eny, enz, nel, i
+
+    enx = this%Xh_schwarz%lx
+    eny = this%Xh_schwarz%ly
+    enz = this%Xh_schwarz%lz
+    nel = this%msh%nelv
+    allocate(t1(ns), t2(ns))
+    call copy(t1, work, ns)
+    call copy(t2, work, ns)
+    w4(1:enx, 1:eny, 1:enz, 1:nel) => work
+    t14(1:enx, 1:eny, 1:enz, 1:nel) => t1
+    t24(1:enx, 1:eny, 1:enz, 1:nel) => t2
+
+    ! t1 = J gs J^-1 work : exact on non-child slots
+    call this%gs_schwarz%op_inv(t1, ns, GS_OP_ADD)
+
+    ! t2 = J gs (Z work) : children receive J(sum of non-child contributions)
+    call this%gs_schwarz%interp%zero_children(t24)
+    call this%gs_schwarz%gs_op_vector(t2, ns, GS_OP_ADD)
+    call this%gs_schwarz%interp%apply_j(t24)
+
+    ! work = Z t1 + (1 - Z) (t2 + work)
+    do i = 1, ns
+       t2(i) = t2(i) + work(i)
+    end do
+    call copy(work, t2, ns)
+    call this%gs_schwarz%interp%zero_children(w4)
+    do i = 1, ns
+       t2(i) = t2(i) - work(i)
+    end do
+    call this%gs_schwarz%interp%zero_children(t14)
+    do i = 1, ns
+       work(i) = t1(i) + t2(i)
+    end do
+    deallocate(t1, t2)
+  end subroutine schwarz_halo_exchange_nc
+
   subroutine schwarz_compute(this, e, r)
     class(schwarz_t), intent(inout) :: this
     real(kind=rp), dimension(this%dof%size()), intent(inout) :: e, r
@@ -591,7 +640,8 @@ contains
               enx, eny, enz, this%msh%nelv)
 
          if (allocated(this%gs_schwarz%interp)) then
-            call this%gs_schwarz%op_inv(work1, ns, GS_OP_ADD)
+            ! F5-B: exact halo exchange at hanging faces
+            call schwarz_halo_exchange_nc(this, work1, ns)
          else
             call this%gs_schwarz%op(work1, ns, GS_OP_ADD)
          end if
@@ -606,7 +656,8 @@ contains
               enx, eny, enz, this%msh%nelv)
 
          if (allocated(this%gs_schwarz%interp)) then
-            call this%gs_schwarz%op_inv(work2, ns, GS_OP_ADD)
+            ! F5-B: exact halo exchange at hanging faces
+            call schwarz_halo_exchange_nc(this, work2, ns)
          else
             call this%gs_schwarz%op(work2, ns, GS_OP_ADD)
          end if
