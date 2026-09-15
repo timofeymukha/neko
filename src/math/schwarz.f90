@@ -254,7 +254,13 @@ contains
          call device_memcpy(work2, this%work2_d, ns, &
               DEVICE_TO_HOST, sync = .true.)
       else
-         call this%gs_schwarz%op(work2, ns, GS_OP_ADD)
+         ! F5: count halo contributions with the same operator used in
+         ! schwarz_compute (op_inv on nonconforming meshes)
+         if (allocated(this%gs_schwarz%interp)) then
+            call this%gs_schwarz%op_inv(work2, ns, GS_OP_ADD)
+         else
+            call this%gs_schwarz%op(work2, ns, GS_OP_ADD)
+         end if
       end if
       call schwarz_extrude(work2, 0, one, work1, 0, -one, enx, eny, enz, &
            msh%nelv)
@@ -274,7 +280,13 @@ contains
          call device_memcpy(work1, this%work1_d, n, &
               DEVICE_TO_HOST, sync = .true.)
       else
-         call this%gs_h%op(work1, n, GS_OP_ADD)
+         ! F5: face nodes are combined with op_h1 (parents decide, children
+         ! interpolate) on nonconforming meshes
+         if (allocated(this%gs_h%interp)) then
+            call this%gs_h%op_h1(work1, n, GS_OP_ADD)
+         else
+            call this%gs_h%op(work1, n, GS_OP_ADD)
+         end if
       end if
 
       k = 1
@@ -608,8 +620,12 @@ contains
 
          ! sum border nodes
          if (allocated(this%gs_schwarz%interp)) then
+            ! F5: mask, then combine border values as a projection onto the
+            ! conforming space (average over non-child incidences, interpolate
+            ! onto hanging children); weights computed consistently in
+            ! schwarz_setup_wt
             call this%bclst%apply_scalar(e, n)
-            call this%gs_h%op(e, n, GS_OP_ADD)
+            call this%gs_h%op_h1(e, n, GS_OP_ADD)
          else
             call this%gs_h%op(e, n, GS_OP_ADD)
             call this%bclst%apply_scalar(e, n)
