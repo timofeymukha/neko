@@ -625,7 +625,7 @@ contains
   end function schwarz_xfer_beta
 
   !> F11: scale the hanging children's halo planes of an extended array.
-  !! Nearly isotropic children (aspect ratio <= NEKO_HANG_AR_THR, default 2)
+  !! Nearly cubic children (aspect ratio <= NEKO_HANG_AR_THR, default 1.05)
   !! receive beta x the parent's overlap; stretched children receive none.
   subroutine schwarz_scale_children_ext(this, work, ns, beta)
     class(schwarz_t), intent(inout) :: this
@@ -639,7 +639,7 @@ contains
     enx = this%Xh_schwarz%lx
     eny = this%Xh_schwarz%ly
     enz = this%Xh_schwarz%lz
-    thr = 2.0_rp
+    thr = 1.05_rp
     call get_environment_variable('NEKO_HANG_AR_THR', buf, l, stat)
     if (stat .eq. 0 .and. l .gt. 0) read(buf, *) thr
     w4(1:enx, 1:eny, 1:enz, 1:this%msh%nelv) => work
