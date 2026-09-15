@@ -280,10 +280,12 @@ contains
          call device_memcpy(work1, this%work1_d, n, &
               DEVICE_TO_HOST, sync = .true.)
       else
-         ! F5: face nodes are combined with op_h1 (parents decide, children
-         ! interpolate) on nonconforming meshes
+         ! F5: on nonconforming meshes the border values are summed over the
+         ! non-child incidences only (children zeroed, plain gs), weighted,
+         ! and then the hanging children are filled by op_h1 from the
+         ! weighted parents. Count with the same operations (no J here).
          if (allocated(this%gs_h%interp)) then
-            call this%gs_h%op_h1(work1, n, GS_OP_ADD)
+            call schwarz_sum_nonchild(this, work1, n)
          else
             call this%gs_h%op(work1, n, GS_OP_ADD)
          end if
@@ -574,6 +576,23 @@ contains
     deallocate(t1, t2)
   end subroutine schwarz_halo_exchange_nc
 
+  !> Sum a regular-size array over the non-child incidences of each node:
+  !! hanging children's faces/edges are zeroed and a plain gather-scatter
+  !! (no interpolation) is applied. Children slots end up holding the
+  !! parent-layout sums and must be refilled afterwards (e.g. with op_h1).
+  subroutine schwarz_sum_nonchild(this, e, n)
+    class(schwarz_t), intent(inout) :: this
+    integer, intent(in) :: n
+    real(kind=rp), intent(inout), target :: e(n)
+    real(kind=rp), pointer :: e4(:,:,:,:)
+    integer :: lx
+
+    lx = this%Xh%lx
+    e4(1:lx, 1:lx, 1:lx, 1:this%msh%nelv) => e
+    call this%gs_h%interp%zero_children(e4)
+    call this%gs_h%gs_op_vector(e, n, GS_OP_ADD)
+  end subroutine schwarz_sum_nonchild
+
   subroutine schwarz_compute(this, e, r)
     class(schwarz_t), intent(inout) :: this
     real(kind=rp), dimension(this%dof%size()), intent(inout) :: e, r
@@ -671,18 +690,18 @@ contains
 
          ! sum border nodes
          if (allocated(this%gs_schwarz%interp)) then
-            ! F5: mask, then combine border values as a projection onto the
-            ! conforming space (average over non-child incidences, interpolate
-            ! onto hanging children); weights computed consistently in
-            ! schwarz_setup_wt
+            ! F5: mask; sum over non-child incidences (children zeroed, no J);
+            ! apply the (consistently computed) weights; then fill hanging
+            ! children by interpolating the weighted parent values (op_h1).
             call this%bclst%apply_scalar(e, n)
+            call schwarz_sum_nonchild(this, e, n)
+            call schwarz_wt3d(e, this%wt, this%Xh%lx, this%msh%nelv)
             call this%gs_h%op_h1(e, n, GS_OP_ADD)
          else
             call this%gs_h%op(e, n, GS_OP_ADD)
             call this%bclst%apply_scalar(e, n)
+            call schwarz_wt3d(e, this%wt, this%Xh%lx, this%msh%nelv)
          end if
-
-         call schwarz_wt3d(e, this%wt, this%Xh%lx, this%msh%nelv)
       end if
     end associate
   end subroutine schwarz_compute
