@@ -870,10 +870,16 @@ contains
          ! normal to pressure bc could pollute domain interior with noise
          ! values from the boundary.
          if (allocated(gs_Xh%interp)) then
+            ! F1: assemble first, then mask the assembled dofs, then project
+            ! onto the masked conforming space so that hanging children carry
+            ! the masked parent values.
+            call gs_Xh%op(p_res, GS_OP_ADD, event)
+            call device_event_sync(event)
+
             ! Set the residual to zero at strong pressure boundaries.
             call this%bclst_dp%apply_scalar(p_res%x, p%dof%size(), time)
 
-            call gs_Xh%op(p_res, GS_OP_ADD, event)
+            call gs_Xh%op_h1(p_res, GS_OP_ADD, event)
             call device_event_sync(event)
 
             ! For testing
@@ -932,15 +938,25 @@ contains
               dt, dm_Xh%size())
 
          if (allocated(gs_Xh%interp)) then
-            ! Set residual to zero at strong velocity boundaries.
-            call this%bclst_vel_res%apply(u_res, v_res, w_res, time)
-
+            ! F1: assemble, mask assembled dofs, re-interpolate children
             call rotate_cyc(u_res, v_res, w_res, 1, c_Xh)
             call gs_Xh%op(u_res, GS_OP_ADD, event)
             call device_event_sync(event)
             call gs_Xh%op(v_res, GS_OP_ADD, event)
             call device_event_sync(event)
             call gs_Xh%op(w_res, GS_OP_ADD, event)
+            call device_event_sync(event)
+            call rotate_cyc(u_res, v_res, w_res, 0, c_Xh)
+
+            ! Set residual to zero at strong velocity boundaries.
+            call this%bclst_vel_res%apply(u_res, v_res, w_res, time)
+
+            call rotate_cyc(u_res, v_res, w_res, 1, c_Xh)
+            call gs_Xh%op_h1(u_res, GS_OP_ADD, event)
+            call device_event_sync(event)
+            call gs_Xh%op_h1(v_res, GS_OP_ADD, event)
+            call device_event_sync(event)
+            call gs_Xh%op_h1(w_res, GS_OP_ADD, event)
             call device_event_sync(event)
             call rotate_cyc(u_res, v_res, w_res, 0, c_Xh)
          else

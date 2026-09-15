@@ -289,15 +289,14 @@ contains
     call this%c_mg%init(this%gs_mg)
 
     ! multiplicity
+    ! F2: use the coef multiplicity (inverse count of non-child incidences,
+    ! zero on hanging children) instead of 1/(J gs J^T 1), so that hanging
+    ! children do not contribute to the restricted residual.
     i = this%mult%size()
-    call rone(this%mult%x, i)
-    call coef%gs_h%op(this%mult%x, i, GS_OP_ADD)
-    call invcol1(this%mult%x, i)
+    call copy(this%mult%x, coef%mult, i)
 
     i = this%mult_mg%size()
-    call rone(this%mult_mg%x, i)
-    call this%gs_mg%op(this%mult_mg%x, i, GS_OP_ADD)
-    call invcol1(this%mult_mg%x, i)
+    call copy(this%mult_mg%x, this%c_mg%mult, i)
 
     ! Create backend specific Ax operator
     call ax_helm_factory(this%ax, full_formulation = .false.)
@@ -621,12 +620,12 @@ contains
 
        call this%grids(1)%gs_h%op(this%r, this%grids(1)%dof%size(), GS_OP_ADD)
 
-       if (allocated(this%grids(1)%gs_h%interp)) then
-          call hsmg_apply_jt(this%r, this%grids(1)%Xh%lx, this%grids(1)%Xh%ly, &
-               this%grids(1)%Xh%lx, this%msh%nelv, this%grids(1)%gs_h)
-       end if
-
+       ! F4: keep the coarse RHS conforming (no extra J^T); mask assembled dofs
        call this%grids(1)%bclst%apply(this%r, this%grids(1)%dof%size())
+       if (allocated(this%grids(1)%gs_h%interp)) then
+          call this%grids(1)%gs_h%op_h1(this%r, this%grids(1)%dof%size(), &
+               GS_OP_ADD)
+       end if
 
        call profiler_start_region('HSMG_coarse-solve', 11)
        if (allocated(this%amg_solver)) then
@@ -644,9 +643,8 @@ contains
        call this%grids(1)%bclst%apply_scalar(this%grids(1)%e%x, &
             this%grids(1)%dof%size())
 
-       if (allocated(this%grids(1)%gs_h%interp)) then
-          call this%grids(1)%gs_h%interp%apply_j(this%grids(1)%e)
-       end if
+       ! F4: the coarse solution is already conforming (CG iterates are
+       ! projected with op_h1); a further apply_j would double-interpolate.
 
        call this%interp_mid_crs%map(this%w, this%grids(1)%e%x, &
             this%msh%nelv, this%grids(2)%Xh)
@@ -731,16 +729,12 @@ contains
     call this%mult%amr_reallocate(reconstruct, counter, time)
     call this%mult_mg%amr_reallocate(reconstruct, counter, time)
 
+    ! F2: coef multiplicity (see hsmg_init_from_components)
     il = this%mult%size()
-    call rone(this%mult%x, il)
-    ! this is not perfect
-    call this%grids(3)%gs_h%op(this%mult%x, il, GS_OP_ADD)
-    call invcol1(this%mult%x, il)
+    call copy(this%mult%x, this%grids(3)%coef%mult, il)
 
     il = this%mult_mg%size()
-    call rone(this%mult_mg%x, il)
-    call this%gs_mg%op(this%mult_mg%x, il, GS_OP_ADD)
-    call invcol1(this%mult_mg%x, il)
+    call copy(this%mult_mg%x, this%c_mg%mult, il)
 
     ! ax does not require restarting
 

@@ -262,11 +262,10 @@ contains
     end if
 
     if (allocated(this%coef%gs_h%interp)) then
-       ! set BCs
-       call this%bclst_filt%apply_scalar(RHS%x, n)
-
-       ! gather scatter
+       ! F1: gather scatter, set BCs on assembled dofs, re-interpolate children
        call this%coef%gs_h%op(RHS, GS_OP_ADD)
+       call this%bclst_filt%apply_scalar(RHS%x, n)
+       call this%coef%gs_h%op_h1(RHS, GS_OP_ADD)
     else
        ! gather scatter
        call this%coef%gs_h%op(RHS, GS_OP_ADD)

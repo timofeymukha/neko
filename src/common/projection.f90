@@ -365,6 +365,11 @@ contains
 
     call bclst%apply_scalar(this%bb(1, this%m), n)
 
+    ! F1: re-interpolate hanging children from the masked parents
+    if (allocated(gs_h%interp)) then
+       call gs_h%op_h1(this%bb(:, this%m), n, GS_OP_ADD)
+    end if
+
     call proj_ortho(this, coef, n)
     call profiler_end_region('Project back', 17)
   end subroutine bcknd_project_back
@@ -415,6 +420,11 @@ contains
          end if
 
          call blst%apply_scalar(bb(1,i), n)
+
+         ! F1: re-interpolate hanging children from the masked parents
+         if (allocated(gs_h%interp)) then
+            call gs_h%op_h1(bb(:, i), n, GS_OP_ADD)
+         end if
       end do
 
       ! Modified Gram-Schmidt

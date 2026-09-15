@@ -216,8 +216,11 @@ contains
          call Ax%compute(w, p(1,p_cur), coef, x%msh, x%Xh)
 
          if (allocated(gs_h%interp)) then
-            call blst%apply(w, n)
+            ! F1: assemble, mask the assembled (independent) dofs, then
+            ! re-interpolate onto hanging children (J Q M Q^T J^T A p)
             call gs_h%op(w, n, GS_OP_ADD)
+            call blst%apply(w, n)
+            call gs_h%op_h1(w, n, GS_OP_ADD)
          else
             call gs_h%op(w, n, GS_OP_ADD)
             call blst%apply(w, n)

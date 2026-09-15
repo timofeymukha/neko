@@ -229,8 +229,10 @@ contains
             call copy(r, f, n)
             call Ax%compute(w, x%x, coef, x%msh, x%Xh)
             if (allocated(gs_h%interp)) then
-               call blst%apply(w, n)
+               ! F1: assemble, mask assembled dofs, re-interpolate children
                call gs_h%op(w, n, GS_OP_ADD)
+               call blst%apply(w, n)
+               call gs_h%op_h1(w, n, GS_OP_ADD)
             else
                call gs_h%op(w, n, GS_OP_ADD)
                call blst%apply(w, n)
@@ -259,8 +261,10 @@ contains
 
             call Ax%compute(w, z(1,j), coef, x%msh, x%Xh)
             if (allocated(gs_h%interp)) then
-               call blst%apply(w, n)
+               ! F1: assemble, mask assembled dofs, re-interpolate children
                call gs_h%op(w, n, GS_OP_ADD)
+               call blst%apply(w, n)
+               call gs_h%op_h1(w, n, GS_OP_ADD)
             else
                call gs_h%op(w, n, GS_OP_ADD)
                call blst%apply(w, n)
