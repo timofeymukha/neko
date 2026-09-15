@@ -265,6 +265,8 @@ contains
          ! schwarz_compute (exact nonconforming exchange)
          if (allocated(this%gs_schwarz%interp)) then
             call schwarz_halo_exchange_nc(this, work2, ns)
+            ! F10: no parent -> children overlap transfer
+            if (schwarz_noxfer()) call schwarz_zero_children_ext(this, work2, ns)
          else
             call this%gs_schwarz%op(work2, ns, GS_OP_ADD)
          end if
@@ -610,6 +612,16 @@ contains
     call this%gs_schwarz%interp%zero_children(w4)
   end subroutine schwarz_zero_children_ext
 
+  !> F10: optional switch (env NEKO_HANG_NOXFER=1): children receive no overlap
+  !! contribution from the parent across hanging faces
+  logical function schwarz_noxfer()
+    character(len=32) :: buf
+    integer :: stat, l
+    schwarz_noxfer = .false.
+    call get_environment_variable('NEKO_HANG_NOXFER', buf, l, stat)
+    if (stat .eq. 0 .and. l .gt. 0) schwarz_noxfer = (buf(1:1) .eq. '1')
+  end function schwarz_noxfer
+
   !> F9: divide the border counts on parent faces (planes 1 and 2 from that
   !! face) by alpha, so that the resulting weights are multiplied by alpha
   subroutine schwarz_scale_parent_counts(this, work, n)
@@ -774,6 +786,12 @@ contains
          if (allocated(this%gs_schwarz%interp)) then
             ! F5-B: exact halo exchange at hanging faces
             call schwarz_halo_exchange_nc(this, work2, ns)
+            ! F10: children keep only their own overlap solution (which is zero
+            ! on their hanging halo): drop the parent's contribution
+            if (schwarz_noxfer()) then
+               call schwarz_zero_children_ext(this, work2, ns)
+               call schwarz_zero_children_ext(this, work1, ns)
+            end if
          else
             call this%gs_schwarz%op(work2, ns, GS_OP_ADD)
          end if
