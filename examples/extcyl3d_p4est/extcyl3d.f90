@@ -316,7 +316,6 @@ contains
                      else
                         ref_mark(il) = amr_flg_none
                      end if
-                  end if
                end do
              end associate
 
