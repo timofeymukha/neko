@@ -252,9 +252,6 @@ contains
       if (allocated(this%gs_schwarz%interp)) then
          call schwarz_zero_children_ext(this, work1, ns)
          call schwarz_zero_children_ext(this, work2, ns)
-         ! F8: parents' local solutions also vanish on parent faces/halo
-         call schwarz_zero_parent_halo(this, work1, ns)
-         call schwarz_zero_parent_halo(this, work2, ns)
       end if
 
       if (NEKO_BCKND_DEVICE .eq. 1) then
@@ -299,6 +296,13 @@ contains
          else
             call this%gs_h%op(work1, n, GS_OP_ADD)
          end if
+      end if
+
+      ! F9: optional damping of the parent-side interface correction: weights on
+      ! the parent's hanging-interface face plane and first interior plane are
+      ! multiplied by NEKO_HANG_PARENT_WT (default 1 = F7 behaviour)
+      if (allocated(this%gs_h%interp) .and. allocated(this%fdm%pface)) then
+         call schwarz_scale_parent_counts(this, work1, n)
       end if
 
       k = 1
@@ -606,7 +610,39 @@ contains
     call this%gs_schwarz%interp%zero_children(w4)
   end subroutine schwarz_zero_children_ext
 
-  !> F8: zero the halo planes of parent faces (faces of non-child elements
+  !> F9: divide the border counts on parent faces (planes 1 and 2 from that
+  !! face) by alpha, so that the resulting weights are multiplied by alpha
+  subroutine schwarz_scale_parent_counts(this, work, n)
+    class(schwarz_t), intent(inout) :: this
+    integer, intent(in) :: n
+    real(kind=rp), intent(inout), target :: work(n)
+    real(kind=rp), pointer :: w4(:,:,:,:)
+    character(len=32) :: buf
+    integer :: lx, e, f, stat, l
+    real(kind=rp) :: alpha
+
+    alpha = 1.0_rp
+    call get_environment_variable('NEKO_HANG_PARENT_WT', buf, l, stat)
+    if (stat .eq. 0 .and. l .gt. 0) read(buf, *) alpha
+    if (abs(alpha - 1.0_rp) .lt. 1e-12_rp) return
+    lx = this%Xh%lx
+    w4(1:lx, 1:lx, 1:lx, 1:this%msh%nelv) => work
+    do e = 1, this%msh%nelv
+       do f = 1, 6
+          if (.not. this%fdm%pface(f, e)) cycle
+          select case (f)
+          case (1); w4(1:2, :, :, e) = w4(1:2, :, :, e) / alpha
+          case (2); w4(lx-1:lx, :, :, e) = w4(lx-1:lx, :, :, e) / alpha
+          case (3); w4(:, 1:2, :, e) = w4(:, 1:2, :, e) / alpha
+          case (4); w4(:, lx-1:lx, :, e) = w4(:, lx-1:lx, :, e) / alpha
+          case (5); w4(:, :, 1:2, e) = w4(:, :, 1:2, e) / alpha
+          case (6); w4(:, :, lx-1:lx, e) = w4(:, :, lx-1:lx, e) / alpha
+          end select
+       end do
+    end do
+  end subroutine schwarz_scale_parent_counts
+
+  !> F8 (unused now): zero the halo planes of parent faces (faces of non-child elements
   !! adjacent to hanging children) in an extended (Schwarz) array
   subroutine schwarz_zero_parent_halo(this, work, ns)
     class(schwarz_t), intent(inout) :: this

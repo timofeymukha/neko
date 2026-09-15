@@ -451,14 +451,6 @@ contains
                if (this%dof%msh%conn%fcs%hang(5, ie) .ne. -1) lbt = 1
                if (this%dof%msh%conn%fcs%hang(6, ie) .ne. -1) rbt = 1
             end if
-            if (allocated(this%pface)) then
-               if (this%pface(1, ie)) lbr = 1
-               if (this%pface(2, ie)) rbr = 1
-               if (this%pface(3, ie)) lbs = 1
-               if (this%pface(4, ie)) rbs = 1
-               if (this%pface(5, ie)) lbt = 1
-               if (this%pface(6, ie)) rbt = 1
-            end if
          end if
 
          nr = nl
