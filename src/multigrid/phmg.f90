@@ -101,6 +101,9 @@ module phmg
      type(interpolator_t), allocatable :: intrp(:)
      type(mesh_t), pointer :: msh
      type(bc_list_t), pointer :: bclst_ext => null()
+     !> P3: user-requested number of tAMG levels (restored at AMR restart)
+     integer :: crs_tamg_lvls_user = 3
+     logical :: use_schwarz = .false.
    contains
      procedure, pass(this) :: init => phmg_init
      procedure, pass(this) :: init_from_components => &
@@ -177,6 +180,8 @@ contains
     this%msh => coef%msh
 
     this%bclst_ext => bclst
+    this%crs_tamg_lvls_user = crs_tamg_lvls
+    this%use_schwarz = (trim(cheby_acc) .eq. "schwarz")
 
     this%nlvls = size(pcrs_sched) + 1
     allocate(lx_lvls(0:this%nlvls - 1))
@@ -400,6 +405,9 @@ contains
            call mg(lvl)%gs_h%op(w%x, mg(lvl)%dm_Xh%size(), GS_OP_ADD, glb_cmd_event)
            call device_stream_wait_event(glb_cmd_queue, glb_cmd_event, 0)
            call mg(lvl)%bclst%apply_scalar(w%x, mg(lvl)%dm_Xh%size())
+           ! P/F1: children take the masked parent values
+           if (allocated(mg(lvl)%gs_h%interp)) &
+                call mg(lvl)%gs_h%op_h1(w%x, mg(lvl)%dm_Xh%size(), GS_OP_ADD)
 
            if (NEKO_BCKND_DEVICE .eq. 1) then
               call device_add2s1(w%x_d, r%x_d, -1.0_rp, mg(lvl)%dm_Xh%size())
@@ -425,6 +433,8 @@ contains
            call mg(lvl+1)%bclst%apply_scalar( &
                 mg(lvl+1)%r%x, &
                 mg(lvl+1)%dm_Xh%size())
+           if (allocated(mg(lvl+1)%gs_h%interp)) &
+                call mg(lvl+1)%gs_h%op_h1(mg(lvl+1)%r%x, mg(lvl+1)%dm_Xh%size(), GS_OP_ADD)
 
            if (NEKO_BCKND_DEVICE .eq. 1) then
               call device_rzero(mg(lvl+1)%z%x_d, mg(lvl+1)%dm_Xh%size())
@@ -455,13 +465,21 @@ contains
            !------------!
            call intrp(lvl+1)%map(w%x, mg(lvl+1)%z%x, msh%nelv, mg(lvl)%Xh)
 
-           call mg(lvl)%gs_h%op(w%x, mg(lvl)%dm_Xh%size(), GS_OP_ADD, glb_cmd_event)
-           call device_stream_wait_event(glb_cmd_queue, glb_cmd_event, 0)
-
-           if (NEKO_BCKND_DEVICE .eq. 1) then
-              call device_col2(w%x_d, mg(lvl)%coef%mult_d, mg(lvl)%dm_Xh%size())
+           if (allocated(mg(lvl)%gs_h%interp)) then
+              ! P1: the correction is a primal vector: project onto the
+              ! conforming space (average over non-child incidences, children
+              ! interpolated) instead of J gs J^T followed by mult, which
+              ! inflates parent faces and zeroes children
+              call mg(lvl)%gs_h%op_h1(w%x, mg(lvl)%dm_Xh%size(), GS_OP_ADD)
            else
-              call col2(w%x, mg(lvl)%coef%mult, mg(lvl)%dm_Xh%size())
+              call mg(lvl)%gs_h%op(w%x, mg(lvl)%dm_Xh%size(), GS_OP_ADD, glb_cmd_event)
+              call device_stream_wait_event(glb_cmd_queue, glb_cmd_event, 0)
+
+              if (NEKO_BCKND_DEVICE .eq. 1) then
+                 call device_col2(w%x_d, mg(lvl)%coef%mult_d, mg(lvl)%dm_Xh%size())
+              else
+                 call col2(w%x, mg(lvl)%coef%mult, mg(lvl)%dm_Xh%size())
+              end if
            end if
 
            !------------!
@@ -674,7 +692,8 @@ contains
     ! interpolator does not require restarting
 
     ! lazy amg free and reinit
-    crs_tamg_lvls = this%amg_solver%nlvls+1!TODO: want to be able to have more levels after refinement but still controlled by user
+    ! P3: keep the user's level count (the old code added one level per remesh)
+    crs_tamg_lvls = this%crs_tamg_lvls_user
     crs_tamg_itrs = this%amg_solver%max_iter
     crs_tamg_cheby_degree = this%amg_solver%smoo(0)%max_iter
 
@@ -689,6 +708,9 @@ contains
     do i = 0, this%nlvls - 1
       call this%phmg_hrchy%lvl(i)%cheby%amr_restart(reconstruct, counter, time)
       call this%phmg_hrchy%lvl(i)%jacobi%amr_restart(reconstruct, counter, time)
+      ! P3: the per-level Schwarz smoother was never restarted
+      if (this%use_schwarz) &
+           call this%phmg_hrchy%lvl(i)%schwarz%amr_restart(reconstruct, counter, time)
     end do
 
   end subroutine phmg_amr_restart
